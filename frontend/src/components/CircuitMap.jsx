@@ -21,6 +21,19 @@ export function project(xs, ys) {
   }))
 }
 
+function projectWithBounds(xs, ys, bounds) {
+  const scale = Math.min(
+    (WIDTH - PAD * 2) / Math.max(1, bounds.maxX - bounds.minX),
+    (HEIGHT - PAD * 2) / Math.max(1, bounds.maxY - bounds.minY),
+  )
+  const ox = (WIDTH - (bounds.maxX - bounds.minX) * scale) / 2
+  const oy = (HEIGHT - (bounds.maxY - bounds.minY) * scale) / 2
+  return xs.map((x, i) => ({
+    x: ox + (x - bounds.minX) * scale,
+    y: HEIGHT - oy - (ys[i] - bounds.minY) * scale,
+  }))
+}
+
 /**
  * Linearly interpolate position and heading from a projected point array.
  * `frac` is a float index, e.g. 3.7 means 70% of the way from point 3 to 4.
@@ -77,7 +90,22 @@ const CORNERS = [
  *   circuitName
  */
 export function CircuitMap({ attacker, defender, focus, lecFrac, perFrac, circuitName }) {
-  const track   = useMemo(() => project(attacker.x, attacker.y), [attacker.x, attacker.y])
+  const tracks = useMemo(() => {
+    const xs = [...attacker.x, ...(defender.x ?? [])]
+    const ys = [...attacker.y, ...(defender.y ?? [])]
+    const bounds = {
+      minX: Math.min(...xs),
+      maxX: Math.max(...xs),
+      minY: Math.min(...ys),
+      maxY: Math.max(...ys),
+    }
+    return {
+      attacker: projectWithBounds(attacker.x, attacker.y, bounds),
+      defender: defender.x?.length > 1 ? projectWithBounds(defender.x, defender.y, bounds) : null,
+    }
+  }, [attacker.x, attacker.y, defender.x, defender.y])
+  const track = tracks.attacker
+  const defenderTrack = tracks.defender ?? track
   const outline = track.map((p) => `${p.x},${p.y}`).join(' ')
 
   // Backward compat for Dashboard which only provides `focus`
@@ -86,7 +114,7 @@ export function CircuitMap({ attacker, defender, focus, lecFrac, perFrac, circui
 
   // Draw both cars using the *same* track geometry, just different positions
   const lecPos = lerpPoint(track, fLec)
-  const perPos = lerpPoint(track, fPer)
+  const perPos = lerpPoint(defenderTrack, fPer)
 
   return (
     <svg

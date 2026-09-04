@@ -4,6 +4,65 @@ This document records the agreed technical and methodological direction for
 PitWolf. It is a planning and review document. It does not claim that the
 items below are already implemented.
 
+## Initial implementation status
+
+The first alignment slice is now implemented in the working tree:
+
+- a backend `tactical-tree.v1` replay evaluates ATTACK, SAVE, and DELAY at
+  every lap in a bounded six-lap tree;
+- both cars carry modelled SoC, the opponent chooses a best response, and a
+  successful pass reverses the attacking and defending roles;
+- the frontend Strategy view consumes the backend tree and requests the
+  opponent's energy trace when it is available;
+- race-speed and energy-surrogate features now use past-only information at a
+  lap-start cutoff, and model reports include temporal-split metadata and an
+  always-SAVE baseline;
+- the decision-point extractor now emits `decision-point.v4` records with
+  alignment, grid, tyre/stint, track-status, weather, missingness, and
+  exclusion metadata; shared-clock lap synchronization excludes lapping /
+  backmarker events from training and old cache versions are automatically
+  rebuilt;
+- pit context no longer adds battery energy to the race trace or surrogate.
+- the action-level transition is now versioned in one shared backend module and
+  is used by both the historical surrogate and tactical replay.
+- stale v1 decision and energy caches are no longer accepted by the replay
+  route; requested races are rebuilt under the current schema before scoring;
+- replay pass probability now penalises depleted SoC, and observed consecutive
+  laps ahead are compared against estimated persistence rather than using a
+  zero-length label horizon.
+- the shared energy transition now has deterministic capacity, clipping, and
+  attacker/defender SoC sensitivity validation covering depleted, partial, and
+  full-charge states.
+- the shared transition now records explicit `2018_2025` and `2026` era
+  configurations plus `energy-transition.v2` provenance in replay responses;
+  the current action calibration remains explicitly provisional because public
+  data does not expose team battery deployment.
+- action deployment is clipped to charge actually available; ATTACK and DELAY
+  are blocked below their minimum energy thresholds, while SAVE can rebuild
+  reserve across the horizon. This applies globally across races and drivers.
+- the Strategy tab can expand the winning path and inspect all three action
+  branches per replay lap, including opponent response and both SoC values.
+- replay results are keyed to the selected race/lap, so a pending request can
+  no longer briefly display a previous lap's fallback tree.
+- the v2 decision records now include public-data proxies for pack traffic,
+  slipstream opportunity, dirty-air exposure, and tyre degradation; the replay
+  consumes these proxies when adjusting pass and repass probability.
+- decision-point.v5 now enforces the LAP_START cutoff for speed delta, lap
+  time, tyre age, and degradation by using only the previous completed lap;
+  stale v4 caches are rejected, and `validate_causal_features.py` verifies
+  future-lap invariance for the energy and degradation features.
+- the final holdout retrain now uses 2018–2025 for training and completed 2026
+  races for evaluation: 30,431 training rows and 2,072 unseen test rows across
+  12 races. The report now includes race-level bootstrap uncertainty,
+  multiclass calibration diagnostics, and an explicit model-vs-always-SAVE
+  comparison; the Overtake page displays these results and does not call the
+  classifier successful when it loses to the baseline.
+
+This is a foundation, not completion of the full specification. The real-race
+replay state, exact on-track zone configuration, pit/tyre model, safety-car
+state, full two-car telemetry alignment, and completed unseen-season evaluation
+remain subsequent work items below.
+
 ## Executive verdict
 
 The current project is a useful prototype, but it is not yet a complete
@@ -212,18 +271,22 @@ or energy state may be used only to construct the target and evaluation
 metrics. This rule should be enforced in the feature-building code and tested
 automatically.
 
-The current implementation has concrete leakage risks that must be removed:
+The previous v4 cache format had concrete leakage risks. The extractor fix is
+now implemented in decision-point.v5:
 
-- `raceMeanSpeedKph` in `extract_decision_points.py` is calculated from the
-  entire race, including laps after the decision point;
-- the reference lap-time calculation in `energy_surrogate.py` uses battle rows
-  from later in the race;
-- a complete current-lap maximum speed or lap time may include information that
-  was not available at the stated decision timestamp.
+- the row-level `raceMeanSpeedKph` is now an expanding past-only mean; the
+  complete-race summary is stored separately as
+  `raceMeanSpeedKphFinalObserved` and is not a model feature;
+- the energy reference uses only completed prior-lap values;
+- speed delta, lap time, tyre age, and degradation use the previous completed
+  lap rather than a complete current lap.
 
-These values must become expanding, time-causal features: at lap or distance
-`t`, calculate them only from data at or before `t`, with a precise definition
-of what is available at the detection line.
+The v5 historical rebuild and the final 2026 holdout rebuild are complete. The
+current report is reproducible under the strict split, but the model is not
+yet a winning policy: its 2026 accuracy is 58.25% versus 69.79% for
+always-SAVE. This is an evaluation finding, not a reason to hide or tune on
+the holdout; the next modelling work should improve the component models and
+replay fidelity using training/development data only.
 
 ### 4.4 Baselines and uncertainty
 

@@ -38,7 +38,12 @@ def wait_for_ondemand():
 def run_task(year, round_number, session_name, max_gap, hold_laps, attempts=5):
     target = OUT_ROOT / str(year) / f'{round_number}_{session_name.lower()}.json'
     if target.exists():
-        return 'skip'
+        try:
+            cached = json.loads(target.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if isinstance(cached, dict) and cached.get('schemaVersion') == 'decision-point.v5':
+            return 'skip'
     delay = 5
     for attempt in range(attempts):
         wait_for_ondemand()
@@ -57,8 +62,11 @@ def run_task(year, round_number, session_name, max_gap, hold_laps, attempts=5):
                 print(f'FAIL {year} R{round_number} {session_name}: {error}', flush=True)
                 return 'fail'
             if is_rate_limited(error):
-                print(f'RATE-LIMITED {year} R{round_number}, sleeping 600s', flush=True)
-                time.sleep(600)
+                # A rate-limit window is shared by the FastF1 process. Waiting
+                # and repeating the same request five times only blocks the
+                # whole batch; leave this race resumable instead.
+                print(f'RATE-LIMITED {year} R{round_number}, skipping until the next window', flush=True)
+                return 'fail'
             else:
                 time.sleep(delay)
                 delay *= 2

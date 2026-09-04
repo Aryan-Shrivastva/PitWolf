@@ -1,5 +1,5 @@
 """Race-wide energy trace for one driver: continuous battery SoC across all
-laps (pit-charge per PU TR Art. 5.4.13 included) plus the three validation
+laps (pit stops do not recharge the on-track state) plus the three validation
 gates required by the PitWolf energy-engine spec:
 
 1. zone alignment  — harvest concentrates at high-speed braking, deployment at
@@ -46,7 +46,6 @@ def build_race_energy_payload(year, round_number, session_name, driver):
     weather_data = session.weather_data
     total_laps = session.total_laps or int(laps['LapNumber'].max())
     soc_window = regs.CONSTANTS['es_soc_window_mj']['value']
-    pit_charge_mj = regs.CONSTANTS['pit_charge_max_kj']['value'] / 1000.0
 
     soc = 0.7 * soc_window
     lap_rows = []
@@ -94,8 +93,6 @@ def build_race_energy_payload(year, round_number, session_name, driver):
         pit_in = bool(lap.get('PitInLane', False))
         pit_out = bool(lap.get('PitOutLane', False))
         soc = summary['socEndMj']
-        if pit_in:
-            soc = min(soc_window, soc + pit_charge_mj)
 
         lap_rows.append({
             'lap': lap_number,
@@ -158,8 +155,8 @@ def build_race_energy_payload(year, round_number, session_name, driver):
         'laps': lap_rows,
         'gates': gates,
         'assumptions': ASSUMPTIONS,
+        'pitDoesNotRechargeEnergy': True,
         'citations': {
-            'pitCharge': regs.CONSTANTS['pit_charge_max_kj']['citation'],
             'harvestCap': regs.CONSTANTS['harvest_max_mj_per_lap']['citation'],
             'socWindow': regs.CONSTANTS['es_soc_window_mj']['citation'],
         },

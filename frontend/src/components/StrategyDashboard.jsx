@@ -16,7 +16,7 @@ import {
 import { recommend, feasibilityScore, STRATEGIES, DECISION_ENGINE_VERSION } from '../lib/decisionEngine'
 import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab } from './DecisionTabs'
 
-const tabs = ['STRATEGY', 'TRACK', 'TELEMETRY', 'ENERGY', 'OVERTAKE', 'LEGENDS']
+const tabs = ['TRACK', 'TELEMETRY', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'LEGENDS']
 
 const { meta, attacker, defender, distance_m: distance, derived } = scenario
 const atk = scenario.attacker_telemetry
@@ -148,7 +148,7 @@ export function StrategyDashboard({ onHome }) {
   const [strategy, setStrategy] = useState('ATTACK')
   const [drsOverride, setDrsOverride] = useState(null)
   const [raceSel, setRaceSel] = useState({ year: 2023, round: 21, session: 'R', driver: 'LEC' })
-  const engine = useRaceEngine(raceSel)
+  const engine = useRaceEngine(raceSel, tab)
 
   // When a season's extracted rounds arrive and exclude the current round
   // (e.g. switching to 2026, which has fewer completed races), snap to the

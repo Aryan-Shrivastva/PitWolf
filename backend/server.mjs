@@ -341,6 +341,7 @@ function runPythonWithInput(script, args, stdinData, timeoutMs) {
 
 const ONDEMAND_LOCK = path.join(F1_CACHE_DIR, '.ondemand.lock')
 let onDemandInFlight = 0
+const f1FetchInFlight = new Map()
 
 async function f1CachedOrFetch(cacheRel, script, args, timeoutMs) {
   const cachePath = path.join(F1_CACHE_DIR, cacheRel)
@@ -349,18 +350,28 @@ async function f1CachedOrFetch(cacheRel, script, args, timeoutMs) {
   } catch {
     // cache miss: fetch below
   }
-  onDemandInFlight += 1
-  if (onDemandInFlight === 1) await writeFile(ONDEMAND_LOCK, String(process.pid)).catch(() => {})
+  const existing = f1FetchInFlight.get(cachePath)
+  if (existing) return existing
+  const pending = (async () => {
+    onDemandInFlight += 1
+    if (onDemandInFlight === 1) await writeFile(ONDEMAND_LOCK, String(process.pid)).catch(() => {})
+    try {
+      const payload = JSON.parse(await runPython(script, args, timeoutMs))
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      const tmpPath = `${cachePath}.tmp`
+      await writeFile(tmpPath, JSON.stringify(payload))
+      await rename(tmpPath, cachePath)
+      return payload
+    } finally {
+      onDemandInFlight -= 1
+      if (onDemandInFlight === 0) await rm(ONDEMAND_LOCK, { force: true }).catch(() => {})
+    }
+  })()
+  f1FetchInFlight.set(cachePath, pending)
   try {
-    const payload = JSON.parse(await runPython(script, args, timeoutMs))
-    await mkdir(path.dirname(cachePath), { recursive: true })
-    const tmpPath = `${cachePath}.tmp`
-    await writeFile(tmpPath, JSON.stringify(payload))
-    await rename(tmpPath, cachePath)
-    return payload
+    return await pending
   } finally {
-    onDemandInFlight -= 1
-    if (onDemandInFlight === 0) await rm(ONDEMAND_LOCK, { force: true }).catch(() => {})
+    f1FetchInFlight.delete(cachePath)
   }
 }
 
@@ -646,7 +657,10 @@ export async function handler(request, response) {
       return json(response, 400, { error: 'year, round, session and driver are required' })
     }
     try {
-      const cacheRel = `energyrace/${year}/${round}_${f1Slug(session)}/${driver}.json`
+      // v2 removes the old pit-charge behaviour and uses the shared energy
+      // transition metadata. Keep it in a new cache namespace so old traces
+      // cannot be served as if they were current.
+      const cacheRel = `energyrace/v2/${year}/${round}_${f1Slug(session)}/${driver}.json`
       return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_energy_race.py', ['--year', year, '--round', round, '--session', session, '--driver', driver], 600000))
     } catch (error) {
       return json(response, 502, { error: error.message })
@@ -671,6 +685,28 @@ export async function handler(request, response) {
     }
   }
 
+  // POST /api/f1/replay/strategy — evaluate a bounded ATTACK/SAVE/DELAY
+  // tactical tree from one observed decision point.  The Python engine owns
+  // the state transition so the UI cannot silently invent a separate energy
+  // model for the same replay.
+  if (request.method === 'POST' && new URL(request.url, 'http://localhost').pathname === '/api/f1/replay/strategy') {
+    let input
+    try {
+      input = await readJsonBody(request)
+    } catch {
+      return json(response, 400, { error: 'request body must be valid JSON' })
+    }
+    if (!input || typeof input !== 'object' || !input.focus) {
+      return json(response, 400, { error: 'focus and replay context are required' })
+    }
+    try {
+      const out = await runPythonWithInput('replay_strategy.py', [], JSON.stringify(input), 60000)
+      return json(response, 200, JSON.parse(out))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
   // GET /api/f1/decisionpoints?year&round&session — pre-extracted overtake
   // decision points for a race, each labelled ATTACK/DELAY/SAVE. Served straight
   // from the batch-extracted cache (no fetch), so it is instant.
@@ -684,7 +720,22 @@ export async function handler(request, response) {
     }
     const cachePath = path.join(F1_CACHE_DIR, 'decision-points', year, `${round}_${f1Slug(session)}.json`)
     try {
-      return json(response, 200, JSON.parse(await readFile(cachePath, 'utf8')))
+      let payload
+      try {
+        payload = JSON.parse(await readFile(cachePath, 'utf8'))
+      } catch {
+        payload = null
+      }
+      // Older caches predate the current causal feature cutoff. Rebuild
+      // only the requested race on demand so the frontend cannot silently
+      // evaluate stale methodology.
+      if (!payload || payload.schemaVersion !== 'decision-point.v5') {
+        const out = await runPython('extract_decision_points.py', [
+          '--year', year, '--round', round, '--session', session,
+        ], 600000)
+        payload = JSON.parse(out)
+      }
+      return json(response, 200, payload)
     } catch {
       return json(response, 404, { error: `no decision points extracted for ${year} round ${round} ${session}` })
     }

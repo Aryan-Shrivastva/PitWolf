@@ -26,6 +26,10 @@ def build_telemetry_payload(year, round_number, session_name, driver, lap_number
     times = tel['Time'].dt.total_seconds().to_numpy()
     distances = tel['Distance'].to_numpy()
 
+    # Keep the car coordinates with the lap trace so replay views can use the
+    # actual GPS path for each lap instead of repeating one reference lap.
+    has_position = 'X' in tel.columns and 'Y' in tel.columns
+
     markers = {}
     s1 = clean(lap.get('Sector1Time'))
     s2 = clean(lap.get('Sector2Time'))
@@ -53,6 +57,8 @@ def build_telemetry_payload(year, round_number, session_name, driver, lap_number
         'trace': {
             'distance': [round(float(v), 1) for v in distances],
             'time': [round(float(v), 3) for v in times],
+            'x': [round(float(v), 2) for v in tel['X']] if has_position else [],
+            'y': [round(float(v), 2) for v in tel['Y']] if has_position else [],
             'speed': [round(float(v), 1) for v in tel['Speed']],
             'throttle': [round(float(v), 1) for v in tel['Throttle']],
             'brake': [bool(v) for v in tel['Brake']],

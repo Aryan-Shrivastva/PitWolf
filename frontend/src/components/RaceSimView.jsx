@@ -8,8 +8,30 @@ const atk       = scenario.attacker_telemetry
 const def       = scenario.defender_telemetry
 const lastIndex = distance.length - 1
 
-const TOTAL_LAPS    = 50
+const TOTAL_LAPS    = Number(meta.total_laps ?? 50)
 const SPEEDS        = [1, 2, 4, 8]
+const RACE_ROUND    = 21
+const RACE_SESSION  = 'R'
+
+const selectedDriverHistory = scenario.drivers?.[attacker.code]?.lap_history ?? []
+const selectedLaps = new Map(selectedDriverHistory.map((lap) => [Number(lap.lap), lap]))
+
+function telemetryForLap(payload, fallback) {
+  const trace = payload?.trace
+  if (!trace?.time?.length || trace.x?.length !== trace.time.length || trace.y?.length !== trace.time.length) return fallback
+  return {
+    ...fallback,
+    speed_kph: trace.speed,
+    throttle_pct: trace.throttle,
+    brake_pct: trace.brake,
+    gear: trace.gear,
+    rpm: trace.rpm,
+    drs_active: trace.drs,
+    x: trace.x,
+    y: trace.y,
+    elapsed_s: trace.time,
+  }
+}
 
 // Sector marker indices
 const S1_IDX = scenario.timing.markers.find((m) => m.label === 'S1')?.index ?? 65
@@ -20,8 +42,6 @@ const BASE_S1  = scenario.timing.attacker.sector_1_s
 const BASE_S2  = scenario.timing.attacker.sector_2_s
 const BASE_S3  = scenario.timing.attacker.sector_3_s
 const BASE_LAP = BASE_S1 + BASE_S2 + BASE_S3
-
-const LAP_DURATION = atk.elapsed_s[lastIndex]
 
 const passZone = derived.braking_zones.reduce(
   (best, zone) => (zone.entry_speed_kph > best.entry_speed_kph ? zone : best),
@@ -56,26 +76,23 @@ const INITIAL_GAP     = 1.2
 const MAX_GAP         = 1.8
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lap time simulation
+// Lap timing replay
 // ─────────────────────────────────────────────────────────────────────────────
 function buildLapTimes() {
   const times = new Array(TOTAL_LAPS + 1)
-  times[TOTAL_LAPS] = BASE_LAP
-
-  let prev = BASE_LAP
-  for (let lap = 1; lap < TOTAL_LAPS; lap++) {
-    const raw  = Math.sin(lap * 127.1) * 43758.5453
-    const unit = raw - Math.floor(raw)
-    const step = (unit - 0.5) * 0.6
-    const candidate = prev + step
-    times[lap] = Math.max(BASE_LAP - 1, Math.min(BASE_LAP + 1, candidate))
-    prev = times[lap]
+  for (let lap = 1; lap <= TOTAL_LAPS; lap++) {
+    const observed = Number(selectedLaps.get(lap)?.lap_time_s)
+    times[lap] = Number.isFinite(observed) && observed > 50 ? observed : BASE_LAP
   }
   return times
 }
 const LAP_TIMES = buildLapTimes()
 
 function lapSectorTimes(lap) {
+  const observed = selectedLaps.get(lap)
+  if ([observed?.sector_1_s, observed?.sector_2_s, observed?.sector_3_s].every((value) => Number.isFinite(Number(value)))) {
+    return { s1: Number(observed.sector_1_s), s2: Number(observed.sector_2_s), s3: Number(observed.sector_3_s) }
+  }
   const total = LAP_TIMES[lap]
   const delta = total - BASE_LAP
   return {
@@ -109,6 +126,7 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
   const [fastestLap,   setFastestLap]   = useState(null)
   const [lastLapTime,  setLastLapTime]  = useState(null)
   const [playbackRate, setPlaybackRate] = useState(1)
+  const [lapTelemetry, setLapTelemetry] = useState({ attacker: atk, defender: def, lap: 1, real: true })
 
   const [lecFrac, setLecFrac] = useState(0)
   const [perFrac, setPerFrac] = useState(0)
@@ -121,6 +139,33 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
   const gapRef          = useRef(INITIAL_GAP)
   const leaderRef       = useRef('PER')
   const postOvertakeRef = useRef(false)
+  const telemetryRef    = useRef(lapTelemetry)
+
+  useEffect(() => {
+    telemetryRef.current = lapTelemetry
+  }, [lapTelemetry])
+
+  useEffect(() => {
+    if (currentLap === 1) return undefined
+    let cancelled = false
+    const query = (driver) => fetch(`/api/f1/telemetry?year=2023&round=${RACE_ROUND}&session=${RACE_SESSION}&driver=${driver}&lap=${currentLap}`)
+      .then((response) => response.ok ? response.json() : null)
+      .catch(() => null)
+
+    Promise.all([query(attacker.code), query(defender.code)]).then(([attackerLap, defenderLap]) => {
+      if (cancelled) return
+      const nextAttacker = telemetryForLap(attackerLap, atk)
+      const nextDefender = telemetryForLap(defenderLap, def)
+      setLapTelemetry({
+        attacker: nextAttacker,
+        defender: nextDefender,
+        lap: currentLap,
+        real: nextAttacker !== atk && nextDefender !== def,
+      })
+    })
+
+    return () => { cancelled = true }
+  }, [currentLap])
 
   useEffect(() => {
     simTimeRef.current = 0
@@ -137,7 +182,8 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
       last = now
       simTimeRef.current += dt
 
-      if (simTimeRef.current >= LAP_DURATION) {
+      const lapDuration = LAP_TIMES[lapRef.current] || BASE_LAP
+      if (simTimeRef.current >= lapDuration) {
         const completedLap  = lapRef.current
         const completedTime = LAP_TIMES[completedLap]
 
@@ -184,8 +230,9 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
       const leaderTime = simTimeRef.current
       const followerTime = Math.max(0, leaderTime - gapRef.current)
 
-      const fLeader = toFocusFrac(leaderTime, atk.elapsed_s)
-      const fFollower = toFocusFrac(followerTime, atk.elapsed_s)
+      const currentTelemetry = telemetryRef.current
+      const fLeader = toFocusFrac(leaderTime, currentTelemetry.attacker.elapsed_s)
+      const fFollower = toFocusFrac(followerTime, currentTelemetry.attacker.elapsed_s)
 
       if (leaderRef.current === 'PER') {
         setPerFrac(fLeader)
@@ -272,14 +319,14 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
       <div className="rs-body">
         <div className="rs-map-panel">
           <div className="rs-map-label">
-            <span>{meta.circuit.toUpperCase()} / LIVE RUN</span>
-            <span className="rs-badge real">● REAL GPS</span>
+            <span>{meta.circuit.toUpperCase()} / REAL-RACE REPLAY</span>
+            <span className="rs-badge real">● REAL GPS · L{lapTelemetry.lap}</span>
           </div>
 
           <div className="rs-map-wrap">
             <CircuitMap
-              attacker={atk}
-              defender={def}
+              attacker={lapTelemetry.attacker}
+              defender={lapTelemetry.defender}
               lecFrac={lecFrac}
               perFrac={perFrac}
               circuitName={meta.circuit}
@@ -289,7 +336,7 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
 
           <div className="rs-map-readout">
             <b>{lapTime}</b>
-            <span>ACTUAL LAP {currentLap} · {gapState.leader} {speed.toFixed(0)} km/h</span>
+            <span>REAL LAP {currentLap} · {gapState.leader} {speed.toFixed(0)} km/h</span>
           </div>
 
           <div className="rs-map-legend">
@@ -299,7 +346,7 @@ export function RaceSimView({ onOpenDashboard, onHome }) {
             <span className={gapState.leader === 'PER' ? 'rs-leading' : ''}>
               <i className="rs-dot per" /> PER
             </span>
-            <em className={gapClass}>{gapLabel}</em>
+            <em className={gapClass}>{gapLabel} · MODELLED GAP</em>
           </div>
         </div>
 

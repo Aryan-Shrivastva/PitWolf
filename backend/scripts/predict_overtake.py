@@ -52,6 +52,13 @@ def build_feature_vector(row, features):
         'attackerCompoundOrd': COMPOUND_ORDINAL.get(str(row.get('attackerCompound')).upper(), 1.0),
         'defenderCompoundOrd': COMPOUND_ORDINAL.get(str(row.get('defenderCompound')).upper(), 1.0),
         'drsEligible': 1.0 if gap <= 1.0 else 0.0,
+        'trafficAheadCount': _num(row.get('trafficAheadCount')),
+        'trafficBehindCount': _num(row.get('trafficBehindCount')),
+        'packDensity': _num(row.get('packDensity')),
+        'slipstreamProxy': _num(row.get('slipstreamProxy')),
+        'dirtyAirRisk': _num(row.get('dirtyAirRisk')),
+        'attackerTyreDegProxy': _num(row.get('attackerTyreDegProxy')),
+        'defenderTyreDegProxy': _num(row.get('defenderTyreDegProxy')),
     }
     # These fields are supplied by the historical extractor after applying the
     # cheap lap-time SoC surrogate.  Keep the neutral 70% state for older cache
