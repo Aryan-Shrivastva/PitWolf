@@ -5,19 +5,26 @@ delegate to per-event appendices (which competitions harvest at 8 MJ, detection
 gaps/lines) are NOT published in the PDFs, so this module uses the regulation
 defaults and flags such values as assumption-prone.
 
-Source documents live in backend/data/fia-docs/.
+The cached documents in ``backend/data/fia-docs/`` are historical drafts only.
+The source URLs below are the current published FIA documents and must be
+rechecked whenever the FIA publishes a later issue.
 """
 
 REGULATION_VERSION = {
-    'pu_technical': 'PU Technical Regulations, Issue 7, 2024-06-11',
-    'sporting_b': 'Sporting Regulations Section B, Issue 2, 2024-12-11',
-    'car_technical_c': 'Car Technical Regulations Section C, Issue 10, 2024-12-11',
-    'pu_sporting': 'PU Sporting Regulations, Issue 7, 2024-10-17',
+    'sporting_b': {
+        'document': '2026 Formula 1 Regulations — Section B [Sporting], Issue 08',
+        'published': '2026-08-05',
+        'url': 'https://www.fia.com/system/files/documents/fia_2026_f1_regulations_-_section_b_sporting_-_iss_08_-_2026-08-05_7.pdf',
+    },
+    'technical_c': {
+        'document': '2026 Formula 1 Regulations — Section C [Technical], Issue 20',
+        'published': '2026-08-05',
+        'url': 'https://www.fia.com/system/files/documents/fia_2026_f1_regulations_-_section_c_technical_-_iss_20_-_2026-08-05.pdf',
+    },
 }
 
-PU_TR = 'PU Technical Regulations Issue 7 (2024-06-11)'
-CAR_TR_C = 'Car Technical Regulations Section C Issue 10 (2024-12-11)'
-SPORTING_B = 'Sporting Regulations Section B Issue 2 (2024-12-11)'
+TECHNICAL_C = '2026 FIA F1 Regulations — Section C [Technical], Issue 20 (2026-08-05)'
+SPORTING_B = '2026 FIA F1 Regulations — Section B [Sporting], Issue 08 (2026-08-05)'
 
 
 def reg(value, unit, citation, note=None):
@@ -26,55 +33,52 @@ def reg(value, unit, citation, note=None):
 
 CONSTANTS = {
     'fuel_energy_flow_max_mj_h': reg(
-        3000.0, 'MJ/h', f'{PU_TR} Art. 5.4.3',
+        3000.0, 'MJ/h', f'{TECHNICAL_C} Art. C5.2.3',
         'Fuel energy flow must not exceed 3000 MJ/h.'),
     'fuel_energy_flow_rpm_ramp_limit': reg(
-        10500.0, 'rpm', f'{PU_TR} Art. 5.4.4',
+        10500.0, 'rpm', f'{TECHNICAL_C} Art. C5.2.4',
         'Below this rpm the fuel energy flow limit is EF = 0.27*N + 165 MJ/h.'),
     'ers_k_dc_power_max_kw': reg(
-        350.0, 'kW', f'{PU_TR} Art. 5.4.7',
+        350.0, 'kW', f'{TECHNICAL_C} Art. C5.2.7',
         'Absolute electrical DC power of the ERS-K may not exceed 350 kW.'),
     'es_soc_window_mj': reg(
-        4.0, 'MJ', f'{PU_TR} Art. 5.4.9',
+        4.0, 'MJ', f'{TECHNICAL_C} Art. C5.2.9',
         'Max minus min state of charge of the ES may not exceed 4 MJ on track.'),
     'harvest_max_mj_per_lap': reg(
-        8.5, 'MJ/lap', f'{PU_TR} Art. 5.4.10',
-        'Energy harvested by ERS-K at the CU-K HV DC bus, per lap.'),
+        8.5, 'MJ/lap', f'{TECHNICAL_C} Art. C5.2.10',
+        'Recharge measured at the CU-K HV DC bus, per lap.'),
     'harvest_max_mj_per_lap_designated': reg(
-        8.0, 'MJ/lap', f'{PU_TR} Art. 5.4.10 i',
-        'Reduced cap at FIA-designated competitions; the list is in the unpublished Appendix.'),
+        7.0, 'MJ/lap', f'{TECHNICAL_C} Art. C5.2.10 i',
+        'Reduced cap at FIA-designated competitions; the event configuration must supply where it applies.'),
     'override_extra_harvest_mj_per_lap': reg(
-        0.5, 'MJ/lap', f'{PU_TR} Art. 5.4.10 ii',
-        'Extra harvest allowed when Override mode conditions (Sporting Regs) are met.'),
+        0.5, 'MJ/lap', f'{TECHNICAL_C} Art. C5.2.10 iii',
+        'Additional Recharge is conditional on the Sporting Regulations and event configuration.'),
     'mgu_k_torque_max_nm': reg(
-        500.0, 'Nm', f'{PU_TR} Art. 5.4.11',
+        500.0, 'Nm', f'{TECHNICAL_C} Art. C5.2.11',
         'MGU-K mechanical torque magnitude, efficiency-corrected by 0.97.'),
     'mgu_k_standing_start_speed_kph': reg(
-        50.0, 'kph', f'{PU_TR} Art. 5.4.12',
+        50.0, 'kph', f'{TECHNICAL_C} Art. C5.2.12',
         'MGU-K usable during a standing start only once the car reaches 50 km/h.'),
-    'pit_charge_max_kj': reg(
-        100.0, 'kJ', f'{PU_TR} Art. 5.4.13',
-        'Max energy that may be added to any ES while stationary in pit lane/garage.'),
-    'launch_min_ers_k_kw': reg(
-        200.0, 'kW', f'{PU_TR} Art. 5.14.6',
-        'ERS-K must deliver at least this DC power for 1 s at full-throttle start.'),
+    'garage_charge_max_kj_qualifying': reg(
+        100.0, 'kJ', f'{TECHNICAL_C} Art. C5.2.13',
+        'Qualifying/Sprint Qualifying garage limit only; this must not be treated as a race pit-stop recharge allowance.'),
     'minimum_mass_race_kg': reg(
-        724.0, 'kg', f'{CAR_TR_C} Art. C4.1',
+        724.0, 'kg', f'{TECHNICAL_C} Art. C4.1',
         'Race minimum mass excluding Nominal Tyre Mass; qualifying is 726 kg.'),
     'minimum_mass_qualifying_kg': reg(
-        726.0, 'kg', f'{CAR_TR_C} Art. C4.1',
+        726.0, 'kg', f'{TECHNICAL_C} Art. C4.1',
         'Sprint Qualifying and Qualifying minimum mass excluding Nominal Tyre Mass.'),
     'heat_hazard_mass_increase_kg': reg(
-        4.0, 'kg', f'{CAR_TR_C} Art. C4.1',
-        'Minimum Mass increase when a Heat Hazard is declared.'),
+        5.0, 'kg', f'{TECHNICAL_C} Art. C4.6',
+        'Heat Hazard Mass Increase during a TTCS; other Competition sessions have a separate 2 kg requirement.'),
     'driver_reference_mass_min_kg': reg(
-        82.0, 'kg', f'{CAR_TR_C} Art. C4.5.2',
+        82.0, 'kg', f'{TECHNICAL_C} Art. C4.5.2',
         'Driver reference mass plus driver ballast must not be less than 82 kg.'),
     'override_activation': reg(
         None, None, f'{SPORTING_B} Art. B7.2',
-        'Per event the FIA publishes the Detection Gap (time), Detection Line and '
-        'Activation Line; Override is available to a car within the Detection Gap of '
-        'another car at the Detection Line, and always in practice sessions.'),
+        'Per event the FIA publishes the Detection Gap, Detection Line, Activation Line, '
+        'power limits and Recharge limits. Overtake requires the control-electronics '
+        'enabled/activated state; no event-specific value may be inferred.'),
 }
 
 MINIMUM_TYRE_MASS_KG = {
@@ -96,7 +100,7 @@ MAX_FUEL_START_KG = {
 
 
 def propulsion_envelope_kw(speed_kph, override=False):
-    """ERS-K propulsion power ceiling vs car speed — PU TR Art. 5.4.8."""
+    """ERS-K propulsion power ceiling vs car speed — Technical C5.2.8."""
     v = max(0.0, speed_kph)
     if override:
         return max(0.0, 7100.0 - 20.0 * v) if v < 355.0 else 0.0
@@ -118,6 +122,6 @@ def ice_power_ceiling_kw(rpm, ice_efficiency):
     """Maximum ICE power implied by the fuel-flow ceiling.
 
     The efficiency is an assumption (typical modern F1 thermal efficiency);
-    the fuel-flow limit itself is Art. 5.4.3/5.4.4.
+    the fuel-flow limit itself is Technical C5.2.3/C5.2.4.
     """
     return fuel_energy_flow_mj_h(rpm) / 3.6 * ice_efficiency

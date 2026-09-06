@@ -4,17 +4,41 @@ import './pitwolf.css'
 import { RaceSimView } from './components/RaceSimView'
 import { StrategyDashboard } from './components/StrategyDashboard'
 
+class AppErrorBoundary extends React.Component {
+  state = { error: null }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('PitWolf page render failed', error, info)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 32, background: '#090d0f', color: '#eaf7f1', fontFamily: 'Manrope, sans-serif' }}>
+      <section style={{ maxWidth: 620, border: '1px solid rgba(225,255,245,.2)', padding: 28, background: 'rgba(11,20,21,.92)' }}>
+        <p style={{ color: '#ff7043', font: "9px 'DM Mono'", letterSpacing: '.12em' }}>PITWOLF / RECOVERABLE PAGE ERROR</p>
+        <h1 style={{ margin: '12px 0', font: "600 34px 'Space Grotesk'" }}>This page could not render.</h1>
+        <p style={{ color: '#9cafa7', lineHeight: 1.6 }}>A temporary data or page-state error was caught before it could blank the application. Refresh the app to return to a clean state.</p>
+        <button type="button" onClick={() => window.location.reload()} style={{ marginTop: 12, padding: '10px 14px', border: '1px solid rgba(255,112,67,.6)', background: 'transparent', color: '#ff9b78', font: "9px 'DM Mono'", letterSpacing: '.08em', cursor: 'pointer' }}>REFRESH PITWOLF</button>
+      </section>
+    </main>
+  }
+}
+
 function App() {
   const [page, setPage] = useState('landing')
 
   if (page === 'sim') {
-    return <RaceSimView
+    return <AppErrorBoundary><RaceSimView
       onOpenDashboard={() => setPage('dashboard')}
       onHome={() => setPage('landing')}
-    />
+    /></AppErrorBoundary>
   }
   if (page === 'dashboard') {
-    return <StrategyDashboard onHome={() => setPage('landing')} />
+    return <AppErrorBoundary><StrategyDashboard onHome={() => setPage('landing')} /></AppErrorBoundary>
   }
 
   return <main className="pitwolf-landing">

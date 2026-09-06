@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "overtake-rule-context.v1",
+  "source": {
+    "publisher": "FIA",
+    "regulation": "2026 Formula 1 Regulations — Section B [Sporting], Issue 08, Article B7.2",
+    "published": "2026-08-05",
+    "url": "https://www.fia.com/system/files/documents/fia_2026_f1_regulations_-_section_b_sporting_-_iss_08_-_2026-08-05_7.pdf"
+  },
+  "eventEntryRequirements": {
+    "purpose": "An entry is used only when every field below is populated from an official FIA Competition appendix or equivalent FIA event document.",
+    "required": [
+      "eventSpecificDataLoaded",
+      "officialDetectionGapS",
+      "detectionLineDistanceM",
+      "activationLineDistanceM",
+      "rechargeLimitMj",
+      "powerLimitProfile",
+      "eventAppendixSource.url",
+      "eventAppendixSource.published"
+    ],
+    "rule": "Never infer missing values from another circuit, a broadcast graphic, a previous season, or the generic analysis filter."
+  },
+  "defaults": {
+    "historical": {
+      "status": "HISTORICAL_ANALYSIS_PROXY",
+      "eventSpecificDataLoaded": false,
+      "officialDetectionGapS": null,
+      "detectionLineDistanceM": null,
+      "activationLineDistanceM": null,
+      "restrictions": [
+        "Historical Overtake/DRS control data is not reconstructed from an official event appendix."
+      ]
+    },
+    "2026": {
+      "status": "EVENT_APPENDIX_REQUIRED",
+      "eventSpecificDataLoaded": false,
+      "officialDetectionGapS": null,
+      "detectionLineDistanceM": null,
+      "activationLineDistanceM": null,
+      "restrictions": [
+        "FIA publishes the detection gap, detection line, activation line, applicable power limits and Recharge limits per Competition.",
+        "Overtake is disabled before a TTCS start/resumption, during a Safety Car deployment and in Low Grip Conditions; the Race Director may disable or re-enable it for safety."
+      ]
+    }
+  },
+  "events": {}
+}

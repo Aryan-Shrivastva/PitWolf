@@ -136,8 +136,8 @@ export function TelemetryCompare({ selectedLaps, onLapsChange }) {
   const grid = refTrace?.distance ?? []
   const xMax = Math.max(1, ...loaded.map((entry) => entry.data.trace.distance[entry.data.trace.distance.length - 1]))
   const markers = refTrace ? [
-    { d: reference.data.sectorMarkers.s2Distance, label: 'S2' },
-    { d: reference.data.sectorMarkers.s3Distance, label: 'S3' },
+    { d: reference.data.sectorMarkers?.s2Distance, label: 'S2' },
+    { d: reference.data.sectorMarkers?.s3Distance, label: 'S3' },
   ].filter((m) => m.d != null) : []
   const cursor = refTrace && (playing || cursorT > 0) ? distanceAtTime(refTrace, cursorT) : null
 

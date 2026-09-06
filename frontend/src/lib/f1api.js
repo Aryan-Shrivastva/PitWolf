@@ -30,7 +30,7 @@ export function fetchDecisionPoints(year, round, session) {
 const memoryCache = new Map()
 // Bump this when a model/schema artifact changes so an old report cannot be
 // displayed from the browser after retraining.
-const CACHE_PREFIX = 'pitwolf:api:v4:'
+const CACHE_PREFIX = 'pitwolf:api:v13:'
 
 function storageGet(key) {
   try {
@@ -108,7 +108,8 @@ export async function predictOvertake(rows) {
 
 export async function fetchStrategyReplay(context) {
   const focus = context?.focus ?? {}
-  const cacheKey = `replay:${focus.year}:${focus.round}:${focus.session}:${focus.lap}:${focus.driver}:${focus.defender}:${context?.regulationEra ?? ''}`
+  const ruleRevision = context?.ruleContext?.eventKey ?? context?.ruleContext?.status ?? ''
+  const cacheKey = `replay:${focus.year}:${focus.round}:${focus.session}:${focus.lap}:${focus.driver}:${focus.defender}:${context?.regulationEra ?? ''}:${ruleRevision}`
   const memory = memoryCache.get(cacheKey)
   if (memory?.value !== undefined && memory.expires > Date.now()) return memory.value
   if (memory?.promise) return memory.promise

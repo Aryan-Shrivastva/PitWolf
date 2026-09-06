@@ -39,6 +39,11 @@ def _num(value, default=0.0):
     return value if value == value else default
 
 
+def _weather(row, field, default=0.0):
+    weather = row.get('weather')
+    return _num(weather.get(field), default) if isinstance(weather, dict) else default
+
+
 def build_feature_vector(row, features):
     gap = _num(row.get('gapS'))
     vector = {
@@ -59,6 +64,12 @@ def build_feature_vector(row, features):
         'dirtyAirRisk': _num(row.get('dirtyAirRisk')),
         'attackerTyreDegProxy': _num(row.get('attackerTyreDegProxy')),
         'defenderTyreDegProxy': _num(row.get('defenderTyreDegProxy')),
+        'airTempC': _weather(row, 'airTempC'),
+        'trackTempC': _weather(row, 'trackTempC'),
+        'humidityPct': _weather(row, 'humidityPct'),
+        'windSpeedMps': _weather(row, 'windSpeedMps'),
+        'rainfall': _weather(row, 'rainfall'),
+        'weatherMissing': 0.0 if isinstance(row.get('weather'), dict) else 1.0,
     }
     # These fields are supplied by the historical extractor after applying the
     # cheap lap-time SoC surrogate.  Keep the neutral 70% state for older cache
