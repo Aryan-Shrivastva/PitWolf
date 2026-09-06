@@ -33,11 +33,32 @@ The Random Forest predicts `ATTACK`, `DELAY`, or `SAVE` from the features availa
 
 The current implementation uses a class-balanced Random Forest with 400 trees, bounded depth, and a minimum leaf size. Its probabilities are passed to the recursive strategy tree, where they are combined with energy and race-context rules.
 
-The model is trained using a strict temporal split. It must never train on the race used for evaluation. The current generated report trains on 2018–2024 and holds out 2025–2026, subject to the races available in the local cache.
+Candidate choice now uses an earlier development window rather than the final
+2026 holdout: fit on 2018–2023, compare on 2024–2025, and keep 2026 untouched
+for the final report. On that development comparison, Random Forest leads the
+currently tested candidates at 56.07% accuracy and 43.52% macro F1, but it
+still trails always-SAVE on raw accuracy (73.80%). It therefore remains a
+research candidate, not a validated deployment policy.
+
+The model is trained using a strict temporal split. It must never train on the race used for evaluation. The current generated report trains on 2018–2025 and holds out the completed 2026 races.
+
+### Weather feature ablation
+
+**Status:** Implemented as an experiment; excluded from the active production
+feature set.
+
+Decision-time FastF1 weather snapshots (air and track temperature, humidity,
+wind, rainfall, and a missing-data flag) are available without future-race
+leakage. On the frozen 2026 holdout, adding them reduced Random Forest from
+58.25% accuracy / 45.37% macro F1 to 57.96% / 45.18%. They therefore remain
+available behind `--include-weather` for future ablations, but are not claimed
+as an improvement or used by the current production candidate.
 
 ### 2. Logistic Regression — interpretable benchmark
 
-**Status:** Planned next comparison.
+**Status:** Implemented as the next comparison benchmark; Random Forest remains
+the production model until a candidate wins on the frozen holdout and the
+downstream persistence metrics.
 
 Logistic Regression will provide a simple linear benchmark. It will show whether the Random Forest is learning useful nonlinear relationships or merely benefiting from straightforward relationships such as smaller gap leading to more attack labels.
 
@@ -45,7 +66,9 @@ It should use the same features, temporal split, and labels as the Random Forest
 
 ### 3. Gradient-boosted trees — likely primary tabular challenger
 
-**Status:** Planned after the Logistic Regression benchmark.
+**Status:** Implemented as a portable benchmark with scikit-learn
+`GradientBoostingClassifier`; Random Forest remains the production model
+until a candidate wins on the frozen holdout and downstream persistence.
 
 The preferred candidates are XGBoost, if the dependency is available, or scikit-learn HistGradientBoosting as a portable alternative.
 
@@ -60,13 +83,48 @@ The best candidate will be selected only if it improves balanced metrics and rem
 
 ### 4. Probability calibration layer
 
-**Status:** Planned after model comparison.
+**Status:** Implemented as a benchmark; not selected for production.
 
 The recursive tree uses action probabilities, so a prediction of 70% should behave approximately like a 70% event over many comparable cases. We will evaluate calibration using reliability checks and, if needed, use Platt scaling or isotonic calibration fitted only inside the training period.
 
 Calibration is important for risk-reward decisions, position durability, and opponent response. It is separate from choosing the most accurate class.
 
-### 5. Neural Network — optional sequence model
+The current sigmoid experiment fits its Random Forest on 2018–2024, learns
+the calibration map only from 2025, and evaluates only on 2026. It improved
+ECE from 12.27% to 6.57%, but reduced macro F1 from 45.37% to 35.18% and its
+held-out replay persistence delta was slightly worse (−4.2888 vs −4.2742
+laps). It is therefore retained as an honest benchmark only.
+
+### 5. Pass-durability component — separate conditional benchmark
+
+**Status:** Implemented for held-out evaluation only; not used by the action
+classifier or tactical tree.
+
+This is deliberately a different model from the three-action classifier. It
+is evaluated only after a real immediate on-track pass has occurred and asks:
+
+> Given the causal pre-pass context, what is the probability that this gained
+> position survives for at least 2, 3, 5, or 6 laps?
+
+It uses the same public, causal feature set and strict 2018–2025 training /
+2026 holdout boundary. This component is useful because it separates two
+questions that must not be conflated: *can a driver gain the position now?*
+and *if they do, will they stay ahead?*
+
+The current 2026 result is not strong enough to deploy. A one-lap target has
+no negative class because each retained immediate pass is already observed to
+survive its first lap. For 2–6 laps, the model has modest discrimination (AUC
+0.73–0.78) but does not yet beat a simple historical hold-rate reference on
+Brier probability error. It is therefore shown as a transparent diagnostic
+benchmark, and it must not yet change a tree branch, an overtake
+recommendation, or a counterfactual claim.
+
+To make it eligible for integration, it needs a better event definition,
+calibrated probability improvement versus the reference, and a causal method
+for scoring the no-pass/SAVE/DELAY alternatives without using future outcomes
+as inputs.
+
+### 6. Neural Network — optional sequence model
 
 **Status:** Later-stage research.
 
@@ -79,7 +137,7 @@ A neural network should only be introduced after the row-based models are stable
 
 It should not be added merely because it is more complex. It requires careful sequence construction, more compute, stronger leakage controls, and enough consistent telemetry across seasons.
 
-### 6. Support Vector Machine — low priority
+### 7. Support Vector Machine — low priority
 
 **Status:** Not currently planned for production.
 
@@ -87,7 +145,7 @@ An SVM could be used as an academic comparison, but it is a weak fit for the cur
 
 It should only be tested if the simpler benchmarks produce an unexpected result that needs investigation.
 
-### 7. Reinforcement Learning — future decision policy
+### 8. Reinforcement Learning — future decision policy
 
 **Status:** Deferred until the simulator is trustworthy.
 
@@ -125,7 +183,15 @@ Every candidate model should be compared with the same held-out races and at lea
 - **Gap-only:** `ATTACK` at gap ≤ 0.70 seconds, `DELAY` at gap ≤ 1.20 seconds, otherwise `SAVE`; this tests whether the model adds value beyond gap size alone.
 - **Majority-class baseline:** predicts whichever label is most common in the training period.
 
-The current UI exposes the Random Forest, always-SAVE, and gap-only comparisons in the held-out validation table.
+The current UI exposes the Random Forest, Logistic Regression, Gradient
+Boosted Trees, always-SAVE, and gap-only comparisons in the held-out
+validation view. On the current v5 2026 holdout, Random Forest scores 58.25%
+accuracy / 45.37% macro F1, Logistic Regression scores 51.35% / 39.85%, and
+Gradient Boosted Trees scores 58.11% / 45.57%. Gradient Boosting has a
+slightly better balanced score and calibration, but slightly lower accuracy,
+so Random Forest remains the production candidate until downstream
+persistence selects a clear winner. Neither model beats the 69.79%
+always-SAVE baseline.
 
 ## Evaluation order
 
@@ -151,6 +217,20 @@ The production model will not be chosen by raw accuracy alone. A candidate must:
 - remain explainable enough for a race-strategy decision.
 
 If a complex model does not improve these measures, the simpler model remains preferable.
+
+The current persistence evaluator uses the completed 2026 immediate-pass rows
+as its evaluation units and a six-lap replay horizon. It reports both the raw
+observed hold duration and a horizon-capped observed value; the latter is the
+fair comparison with the replay estimate. Run it after training with:
+
+```text
+python backend/scripts/evaluate_replay_persistence.py
+```
+
+Its output is stored in `overtake_report.json` under `replayPersistence` and
+is rendered in the Overtake validation page. A positive delta is an estimate
+under the documented modelled-SoC/opponent-response assumptions, not proof of
+an alternate real-race result.
 
 ## Important limitations
 

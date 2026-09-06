@@ -27,8 +27,8 @@ except ImportError:  # allow package-style unit tests as well as direct scripts
                                     era_for_year, get_era_config, transition_soc)
 
 
-TREE_VERSION = "tactical-tree.v3"
-SCHEMA_VERSION = "replay-state.v3"
+TREE_VERSION = "tactical-tree.v4"
+SCHEMA_VERSION = "replay-state.v4"
 START_SOC_MJ = 2.8
 MAX_HORIZON = 6
 ACTIONS = ("ATTACK", "SAVE", "DELAY")
@@ -195,120 +195,154 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
     energy_config = get_era_config(regulation_era)
     initial_our_soc = soc_from_laps(energy_laps, selected, start_lap)
     initial_defender_soc = soc_from_laps(energy_laps, initial_defender, start_lap)
-    node_count = 0
-    leaf_count = 0
+    def simulate(our_start: float, defender_start: float) -> tuple[dict[str, Any], list[dict[str, Any]], int, int]:
+        """Evaluate one deterministic tree from an explicit pair of SoC states."""
+        node_count = 0
+        leaf_count = 0
 
-    def expand(state: dict[str, Any], depth: int) -> tuple[float, dict[str, Any]]:
-        nonlocal node_count, leaf_count
-        node_count += 1
-        if depth >= horizon or state["lap"] >= total_laps:
-            leaf_count += 1
-            value = (state["leadLaps"] * 100.0
-                     + (state["aheadProbability"] * 20.0)
-                     + (state["ourSoc"] * RESERVE_WEIGHT))
-            return value, {
-                "lap": state["lap"], "role": "DEFENDING" if state["ahead"] else "ATTACKING",
+        def expand(state: dict[str, Any], depth: int) -> tuple[float, dict[str, Any]]:
+            nonlocal node_count, leaf_count
+            node_count += 1
+            if depth >= horizon or state["lap"] >= total_laps:
+                leaf_count += 1
+                value = (state["leadLaps"] * 100.0
+                         + (state["aheadProbability"] * 20.0)
+                         + (state["ourSoc"] * RESERVE_WEIGHT))
+                return value, {
+                    "lap": state["lap"], "role": "DEFENDING" if state["ahead"] else "ATTACKING",
+                    "leadLaps": round(state["leadLaps"], 3),
+                    "aheadProbability": round(state["aheadProbability"], 4),
+                    "ourSoc": round(state["ourSoc"], 3),
+                    "defenderSoc": round(state["defenderSoc"], 3),
+                    "children": [],
+                }
+
+            lap = state["lap"]
+            forward = row_for(rows, lap, selected, initial_defender) or focus
+            reverse = row_for(rows, lap, initial_defender, selected) or {}
+            observed = reverse if state["ahead"] else forward
+            children = []
+            for action in ACTIONS:
+                our_soc, deploy, harvest = transition_soc(
+                    state["ourSoc"], action, observed, state["ahead"], era=regulation_era)
+                opponent_action, response_score = best_response(
+                    reverse if state["ahead"] else forward,
+                    state["defenderSoc"], state["ourSoc"], state["ahead"], regulation_era,
+                )
+                opponent_soc, opponent_deploy, opponent_harvest = transition_soc(
+                    state["defenderSoc"], opponent_action, observed, not state["ahead"],
+                    era=regulation_era,
+                )
+                if state["ahead"]:
+                    repass = attack_chance(reverse or forward, opponent_action,
+                                           opponent_soc, our_soc, True)
+                    survival = max(0.02, min(0.99, 1.0 - repass))
+                    next_ahead = state["aheadProbability"] * survival
+                    event_probability = survival
+                else:
+                    pass_probability = attack_chance(forward, action, our_soc,
+                                                     opponent_soc, False)
+                    next_ahead = state["aheadProbability"] + ((1.0 - state["aheadProbability"])
+                                                                * pass_probability)
+                    event_probability = pass_probability
+                lead_laps = state["leadLaps"] + next_ahead
+                next_state = {
+                    "lap": lap + 1,
+                    "ahead": next_ahead >= 0.5,
+                    "aheadProbability": next_ahead,
+                    "leadLaps": lead_laps,
+                    "ourSoc": our_soc,
+                    "defenderSoc": opponent_soc,
+                }
+                value, next_node = expand(next_state, depth + 1)
+                children.append({
+                    "action": action,
+                    "probability": round(event_probability, 4),
+                    "aheadProbability": round(next_ahead, 4),
+                    "ourSoc": round(our_soc, 3),
+                    "defenderSoc": round(opponent_soc, 3),
+                    "deployMj": deploy,
+                    "harvestMj": harvest,
+                    "opponentAction": opponent_action,
+                    "opponentDeployMj": opponent_deploy,
+                    "opponentHarvestMj": opponent_harvest,
+                    "opponentResponseScore": response_score,
+                    "pitPlan": "OBSERVED PIT WINDOW; NO BATTERY RESET" if bool(observed.get("pitDistorted")) else "STAY OUT",
+                    "leadLaps": round(lead_laps, 3),
+                    "value": value,
+                    "next": next_node,
+                })
+            best = max(children, key=lambda child: child["value"])
+            for child in children:
+                child["best"] = child is best
+            return best["value"], {
+                "lap": lap, "role": "DEFENDING" if state["ahead"] else "ATTACKING",
                 "leadLaps": round(state["leadLaps"], 3),
                 "aheadProbability": round(state["aheadProbability"], 4),
                 "ourSoc": round(state["ourSoc"], 3),
                 "defenderSoc": round(state["defenderSoc"], 3),
-                "children": [],
+                "bestAction": best["action"],
+                "children": children,
             }
 
-        lap = state["lap"]
-        forward = row_for(rows, lap, selected, initial_defender) or focus
-        reverse = row_for(rows, lap, initial_defender, selected) or {}
-        observed = reverse if state["ahead"] else forward
-        children = []
-        for action in ACTIONS:
-            our_soc, deploy, harvest = transition_soc(
-                state["ourSoc"], action, observed, state["ahead"], era=regulation_era)
-            opponent_action, response_score = best_response(
-                reverse if state["ahead"] else forward,
-                state["defenderSoc"], state["ourSoc"], state["ahead"], regulation_era,
-            )
-            opponent_soc, opponent_deploy, opponent_harvest = transition_soc(
-                state["defenderSoc"], opponent_action, observed, not state["ahead"],
-                era=regulation_era,
-            )
-            if state["ahead"]:
-                # The former attacker now tries to retake the place.  The
-                # selected action changes the defence; opponent SoC matters.
-                repass = attack_chance(reverse or forward, opponent_action,
-                                       opponent_soc, our_soc, True)
-                survival = max(0.02, min(0.99, 1.0 - repass))
-                next_ahead = state["aheadProbability"] * survival
-                event_probability = survival
-            else:
-                pass_probability = attack_chance(forward, action, our_soc,
-                                                 opponent_soc, False)
-                next_ahead = state["aheadProbability"] + ((1.0 - state["aheadProbability"])
-                                                            * pass_probability)
-                event_probability = pass_probability
-            lead_laps = state["leadLaps"] + next_ahead
-            next_state = {
-                "lap": lap + 1,
-                "ahead": next_ahead >= 0.5,
-                "aheadProbability": next_ahead,
-                "leadLaps": lead_laps,
-                "ourSoc": our_soc,
-                "defenderSoc": opponent_soc,
-            }
-            value, next_node = expand(next_state, depth + 1)
-            children.append({
-                "action": action,
-                "probability": round(event_probability, 4),
-                "aheadProbability": round(next_ahead, 4),
-                "ourSoc": round(our_soc, 3),
-                "defenderSoc": round(opponent_soc, 3),
-                "deployMj": deploy,
-                "harvestMj": harvest,
-                "opponentAction": opponent_action,
-                "opponentDeployMj": opponent_deploy,
-                "opponentHarvestMj": opponent_harvest,
-                "opponentResponseScore": response_score,
-                "pitPlan": "OBSERVED PIT WINDOW; NO BATTERY RESET" if bool(observed.get("pitDistorted")) else "STAY OUT",
-                "leadLaps": round(lead_laps, 3),
-                "value": value,
-                "next": next_node,
+        _, scenario_tree = expand({
+            "lap": start_lap,
+            "ahead": False,
+            "aheadProbability": 0.0,
+            "leadLaps": 0.0,
+            "ourSoc": clamp(our_start),
+            "defenderSoc": clamp(defender_start),
+        }, 0)
+        scenario_path = []
+        cursor = scenario_tree
+        while cursor.get("children"):
+            child = next((item for item in cursor["children"] if item.get("best")), cursor["children"][0])
+            scenario_path.append({key: child[key] for key in (
+                "action", "probability", "ourSoc", "defenderSoc", "opponentAction",
+                "deployMj", "harvestMj", "opponentDeployMj", "opponentHarvestMj",
+                "pitPlan", "leadLaps", "aheadProbability")})
+            scenario_path[-1]["lap"] = cursor["lap"]
+            scenario_path[-1]["role"] = cursor["role"]
+            cursor = child["next"]
+        return scenario_tree, scenario_path, node_count, leaf_count
+
+    tree, path, node_count, leaf_count = simulate(initial_our_soc, initial_defender_soc)
+    sensitivity_summary = None
+    if payload.get("includeSensitivity", True):
+        sensitivity_cases = (
+            ("ATTACKER_LOW", "ATTACKER −0.50 MJ", initial_our_soc - 0.5, initial_defender_soc),
+            ("BASE", "BASE ESTIMATE", initial_our_soc, initial_defender_soc),
+            ("DEFENDER_HIGH", "DEFENDER +0.50 MJ", initial_our_soc, initial_defender_soc + 0.5),
+        )
+        soc_sensitivity = []
+        for scenario_id, label, our_start, defender_start in sensitivity_cases:
+            scenario_tree, scenario_path, _, _ = simulate(our_start, defender_start)
+            first_step = scenario_path[0] if scenario_path else {}
+            soc_sensitivity.append({
+                "id": scenario_id,
+                "label": label,
+                "attackerStartSocMj": round(clamp(our_start), 3),
+                "defenderStartSocMj": round(clamp(defender_start), 3),
+                "recommendedAction": first_step.get("action", scenario_tree.get("bestAction")),
+                "expectedLeadLaps": round(number(scenario_path[-1].get("leadLaps") if scenario_path else 0.0), 3),
             })
-        best = max(children, key=lambda child: child["value"])
-        for child in children:
-            child["best"] = child is best
-        return best["value"], {
-            "lap": lap, "role": "DEFENDING" if state["ahead"] else "ATTACKING",
-            "leadLaps": round(state["leadLaps"], 3),
-            "aheadProbability": round(state["aheadProbability"], 4),
-            "ourSoc": round(state["ourSoc"], 3),
-            "defenderSoc": round(state["defenderSoc"], 3),
-            "bestAction": best["action"],
-            "children": children,
+        base_action = soc_sensitivity[1]["recommendedAction"]
+        sensitivity_summary = {
+            "perturbationMj": 0.5,
+            "stableRecommendation": all(item["recommendedAction"] == base_action for item in soc_sensitivity),
+            "baseAction": base_action,
+            "cases": soc_sensitivity,
+            "note": "Sensitivity scenarios perturb modelled SoC only; they are not measurements of either car's battery.",
         }
 
-    _, tree = expand({
-        "lap": start_lap,
-        "ahead": False,
-        "aheadProbability": 0.0,
-        "leadLaps": 0.0,
-        "ourSoc": initial_our_soc,
-        "defenderSoc": initial_defender_soc,
-    }, 0)
-
-    path = []
-    cursor = tree
-    while cursor.get("children"):
-        child = next((item for item in cursor["children"] if item.get("best")), cursor["children"][0])
-        path.append({key: child[key] for key in (
-            "action", "probability", "ourSoc", "defenderSoc", "opponentAction",
-            "deployMj", "harvestMj", "opponentDeployMj", "opponentHarvestMj",
-            "pitPlan", "leadLaps", "aheadProbability")})
-        path[-1]["lap"] = cursor["lap"]
-        path[-1]["role"] = cursor["role"]
-        cursor = child["next"]
-
-    actual_lead_laps = int(number(focus.get("observedLeadLaps"), -1))
-    if actual_lead_laps < 0:
-        actual_lead_laps = int(number(focus.get("holdLaps"), 0)) if focus.get("held") else (1 if focus.get("passedNow") else 0)
+    observed_lead_laps = int(number(focus.get("observedLeadLaps"), -1))
+    if observed_lead_laps < 0:
+        observed_lead_laps = int(number(focus.get("holdLaps"), 0)) if focus.get("held") else (1 if focus.get("passedNow") else 0)
+    # The replay is intentionally a bounded tactical horizon.  Keep the raw
+    # observed duration for auditability, but compare it with the estimate only
+    # inside the same horizon; otherwise a pass held to the chequered flag would
+    # be compared unfairly with a six-lap counterfactual.
+    actual_lead_laps = min(observed_lead_laps, horizon)
     expected = path[-1]["leadLaps"] if path else 0.0
     root_context = context(focus)
     persistence_by_horizon = []
@@ -320,6 +354,16 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             "observed": actual_lead_laps >= horizon_laps,
         })
     finish_positions = payload.get("finishPositions") or {}
+    raw_rule_context = payload.get("ruleContext")
+    rule_context = raw_rule_context if isinstance(raw_rule_context, dict) else {}
+    # A line position cannot affect the tactical tree until the decision rows
+    # carry compatible track-distance coordinates.  Preserve the official
+    # context for auditability without treating it as applied race physics.
+    rule_application = (
+        "TRACK_DISTANCE_ALIGNMENT_REQUIRED"
+        if rule_context.get("eventSpecificDataLoaded")
+        else "DISCLOSURE_ONLY_UNTIL_EVENT_APPENDIX_LOADED"
+    )
     return {
         "schemaVersion": SCHEMA_VERSION,
         "treeVersion": TREE_VERSION,
@@ -329,16 +373,20 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
         "leafCount": leaf_count,
         "horizon": horizon,
         "actualLeadLaps": actual_lead_laps,
+        "observedLeadLaps": observed_lead_laps,
+        "comparisonHorizonLaps": horizon,
         "expectedLeadLaps": expected,
         "actualFinishPosition": finish_positions.get(selected),
         "success": bool(path) and expected > actual_lead_laps,
         "persistenceByHorizon": persistence_by_horizon,
+        "socSensitivity": sensitivity_summary,
         "decisionContext": {
             "raceControl": "CLEAR" if root_context["track_clear"] else "GATED",
             "pitDistorted": root_context["pit_distorted"],
             "attackerTrackStatus": focus.get("attackerTrackStatus"),
             "defenderTrackStatus": focus.get("defenderTrackStatus"),
             "overtakeActionsEnabled": root_context["track_clear"] and not root_context["pit_distorted"],
+            "ruleContext": {**rule_context, "application": rule_application},
         },
         "selected": selected,
         "defender": initial_defender,
@@ -358,6 +406,7 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             "The tactical horizon is capped at six laps to avoid an unbounded 3^N tree.",
             "Non-green race-control states and pit-distorted exchanges are gated as non-overtake windows.",
             "Success compares estimated persistence with observed consecutive laps ahead, not finish position alone.",
+            "The SoC sensitivity panel varies modelled starting energy by 0.50 MJ; it is a robustness check, not private battery telemetry.",
         ],
     }
 

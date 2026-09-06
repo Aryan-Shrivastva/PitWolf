@@ -15,6 +15,12 @@ import {
 const pct = (v, d = 0) => (v == null || Number.isNaN(v) ? '—' : `${Number(v).toFixed(d)}%`)
 const mj = (v, d = 2) => (v == null || Number.isNaN(v) ? '—' : `${Number(v).toFixed(d)} MJ`)
 const num = (v, d = 1) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d))
+const modelName = (name) => ({
+  RandomForestClassifier: 'Random Forest',
+  RandomForestSigmoidCalibrated: 'Random Forest + Sigmoid',
+  LogisticRegression: 'Logistic Regression',
+  GradientBoostingClassifier: 'Gradient Boosted Trees',
+}[name] ?? name)
 
 function Badge({ tone = 'real', children }) {
   return <span className={`data-badge ${tone}`}><i />{children}</span>
@@ -37,185 +43,21 @@ function GatePill({ pass }) {
   return <b className={`dt-gate ${pass ? 'pass' : 'fail'}`}>{pass ? '✓ PASS' : '✗ FAIL'}</b>
 }
 
-// ─── Energy-aware recursive counterfactual tree ─────────────────────────────
-
-const TREE_ACTIONS = ['ATTACK', 'SAVE', 'DELAY']
-const TREE_CAPACITY_MJ = 4.0
-const TREE_ENERGY = {
-  ATTACK: { cost: 0.85, harvest: 0.05 },
-  SAVE: { cost: 0.15, harvest: 0.35 },
-  DELAY: { cost: 0.40, harvest: 0.15 },
-}
-
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
-
-function buildSurrogateSoc(laps, rows, driver, totalLaps) {
-  const explicit = new Map((laps ?? []).map((lap) => [Number(lap.lap), Number(lap.socEndMj)]))
-  const events = rows.filter((row) => row.driver === driver || row.defender === driver)
-  let soc = TREE_CAPACITY_MJ * 0.7
-  const profile = {}
-  for (let lap = 1; lap <= totalLaps; lap += 1) {
-    if (explicit.has(lap) && Number.isFinite(explicit.get(lap))) {
-      soc = clamp(explicit.get(lap), 0, TREE_CAPACITY_MJ)
-      profile[lap] = soc
-      continue
-    }
-    const event = [...events].reverse().find((row) => row.lap <= lap) ?? events[0]
-    const pace = clamp(0.5 + ((event?.speedDeltaKph ?? 0) / 40) + ((event?.closingRateS ?? 0) / 8), 0.15, 0.9)
-    const tyreLoad = clamp(Math.abs(event?.tyreAgeDiff ?? 0) / 20, 0, 0.3)
-    const deploy = 0.25 + (0.5 * pace) + tyreLoad
-    const harvest = 0.22 + (0.24 * (1 - pace))
-    soc = clamp(soc - deploy + harvest, 0, TREE_CAPACITY_MJ)
-    if (event?.pitDistorted) soc = clamp(soc + 1.0, 0, TREE_CAPACITY_MJ)
-    profile[lap] = soc
-  }
-  return profile
-}
-
-function treeActionProbability(action, row, reverseRow, ourSoc, defenderSoc, ahead) {
-  const probabilities = row?.pred?.probabilities ?? {}
-  const reverseProbabilities = reverseRow?.pred?.probabilities ?? {}
-  const ownReserve = clamp(ourSoc / TREE_CAPACITY_MJ, 0, 1)
-  const opponentReserve = clamp(defenderSoc / TREE_CAPACITY_MJ, 0, 1)
-  if (!ahead) {
-    const base = action === 'ATTACK'
-      ? (probabilities.ATTACK ?? 0.2)
-      : action === 'DELAY'
-        ? (probabilities.DELAY ?? 0.25) * 0.72
-        : (probabilities.SAVE ?? 0.55) * 0.08
-    return clamp(base * (0.55 + (0.5 * ownReserve)) * (1.05 - (0.4 * opponentReserve)), 0.01, 0.98)
-  }
-  // Once ahead, the selected car is defending. The old defender becomes the
-  // attacker and can spend whatever energy remains to reverse the pass.
-  const opponentAttack = reverseProbabilities.ATTACK ?? probabilities.ATTACK ?? 0.25
-  const response = opponentAttack * (0.45 + (0.65 * opponentReserve)) * (1.05 - (0.25 * ownReserve))
-  const defensiveUse = action === 'ATTACK' ? 0.9 : action === 'DELAY' ? 0.68 : 0.48
-  return clamp(1 - (response * defensiveUse), 0.02, 0.99)
-}
-
-function buildStrategyTree({ focus, rows, energyLaps, totalLaps, holdLaps = 6, finishPositions = {} }) {
-  if (!focus) return null
-  const startLap = Number(focus.lap)
-  const horizon = Math.max(0, Math.min(holdLaps, totalLaps - startLap))
-  const selected = focus.driver
-  const initialDefender = focus.defender
-  const ourProfile = buildSurrogateSoc(energyLaps, rows, selected, totalLaps)
-  const defenderProfile = buildSurrogateSoc([], rows, initialDefender, totalLaps)
-  let nodeCount = 0
-  let leafCount = 0
-
-  const rowAt = (lap, driver, defender) => rows.find((row) => row.lap === lap && row.driver === driver && row.defender === defender)
-
-  const expand = (state, depth) => {
-    nodeCount += 1
-    if (depth >= horizon || state.lap >= totalLaps) {
-      leafCount += 1
-      return {
-        value: (state.leadLaps * 100) + (state.aheadProbability * 20) + (state.ourSoc * 2),
-        node: { lap: state.lap, role: state.ahead ? 'DEFENDING' : 'ATTACKING', leadLaps: state.leadLaps, aheadProbability: state.aheadProbability, children: [] },
-      }
-    }
-
-    const lap = state.lap
-    const forwardRow = rowAt(lap, selected, initialDefender) ?? focus
-    const reverseRow = rowAt(lap, initialDefender, selected)
-    const observed = state.ahead ? reverseRow : forwardRow
-    const children = TREE_ACTIONS.map((action) => {
-      const energy = TREE_ENERGY[action]
-      let ourSoc = clamp(state.ourSoc - energy.cost + energy.harvest, 0, TREE_CAPACITY_MJ)
-      let defenderSoc = clamp(state.defenderSoc - 0.2 + (state.ahead ? 0.08 : 0.22), 0, TREE_CAPACITY_MJ)
-      const pitWindow = Boolean(observed?.pitDistorted)
-      const pitPlan = pitWindow && action !== 'ATTACK' ? 'BOX / ENERGY RESET' : pitWindow ? 'STAY / ATTACK BEFORE BOX' : 'STAY OUT'
-      if (pitWindow && action !== 'ATTACK') ourSoc = clamp(ourSoc + 1.0, 0, TREE_CAPACITY_MJ)
-      const survival = treeActionProbability(action, forwardRow, reverseRow, ourSoc, defenderSoc, state.ahead)
-      const nextAheadProbability = state.ahead
-        ? state.aheadProbability * survival
-        : state.aheadProbability + ((1 - state.aheadProbability) * survival)
-      const leadLaps = state.leadLaps + nextAheadProbability
-      const next = expand({
-        lap: lap + 1,
-        ahead: nextAheadProbability >= 0.5,
-        aheadProbability: nextAheadProbability,
-        leadLaps,
-        ourSoc,
-        defenderSoc,
-      }, depth + 1)
-      return {
-        action,
-        probability: survival,
-        ourSoc,
-        defenderSoc,
-        pitPlan,
-        result: next,
-      }
-    })
-    const best = children.reduce((winner, child) => child.result.value > winner.result.value ? child : winner, children[0])
-    return {
-      value: best.result.value,
-      node: {
-        lap,
-        role: state.ahead ? 'DEFENDING' : 'ATTACKING',
-        leadLaps: state.leadLaps,
-        aheadProbability: state.aheadProbability,
-        ourSoc: state.ourSoc,
-        defenderSoc: state.defenderSoc,
-        bestAction: best.action,
-        children: children.map((child) => ({
-          action: child.action,
-          probability: child.probability,
-          leadLaps: child.result.node.leadLaps,
-          ourSoc: child.ourSoc,
-          defenderSoc: child.defenderSoc,
-          pitPlan: child.pitPlan,
-          best: child.action === best.action,
-          next: child.result.node,
-        })),
-      },
-    }
-  }
-
-  const initialOurSoc = ourProfile[startLap] ?? TREE_CAPACITY_MJ * 0.7
-  const initialDefenderSoc = defenderProfile[startLap] ?? TREE_CAPACITY_MJ * 0.7
-  const tree = expand({
-    lap: startLap,
-    ahead: false,
-    aheadProbability: 0,
-    leadLaps: 0,
-    ourSoc: initialOurSoc,
-    defenderSoc: initialDefenderSoc,
-  }, 0)
-
-  const path = []
-  let cursor = tree.node
-  while (cursor?.children?.length) {
-    const best = cursor.children.find((child) => child.best) ?? cursor.children[0]
-    path.push({ lap: cursor.lap, role: cursor.role, action: best.action, probability: best.probability, leadLaps: best.leadLaps, ourSoc: best.ourSoc, defenderSoc: best.defenderSoc, pitPlan: best.pitPlan })
-    cursor = best.next
-  }
-  const actualLeadLaps = focus.observedLeadLaps != null
-    ? Number(focus.observedLeadLaps)
-    : focus.held ? holdLaps : focus.passedNow ? 1 : 0
-  return {
-    tree: tree.node,
-    path,
-    nodeCount,
-    leafCount,
-    horizon,
-    actualLeadLaps,
-    expectedLeadLaps: path.length ? path[path.length - 1].leadLaps : 0,
-    actualFinishPosition: finishPositions?.[selected] ?? null,
-    success: path.length > 0 && path[path.length - 1].leadLaps > actualLeadLaps,
-    selected,
-    defender: initialDefender,
-  }
-}
+// ─── Backend strategy replay ────────────────────────────────────────────────
+//
+// The backend is deliberately the only authority for the tactical tree.  A
+// former frontend fallback used its own action profile and could add energy at
+// a pit stop; that could conflict with the source-controlled model and FIA
+// constraints.  If the replay service is unavailable, show that state rather
+// than inventing an alternative calculation in the browser.
 
 function StrategyTreePanel({ tree }) {
   if (!tree) return null
   const persistenceDelta = tree.expectedLeadLaps - tree.actualLeadLaps
+  const comparisonHorizon = tree.comparisonHorizonLaps ?? tree.horizon ?? 6
   const comparisonExplanation = tree.success
-    ? `BETTER means the tree estimates ${persistenceDelta.toFixed(1)} more lap${persistenceDelta === 1 ? '' : 's'} ahead than the real race.`
-    : `NOT YET means the tree estimates ${Math.abs(persistenceDelta).toFixed(1)} fewer or equal lap${Math.abs(persistenceDelta) === 1 ? '' : 's'} ahead than the real race.`
+    ? `BETTER means the tree estimates ${persistenceDelta.toFixed(1)} more lap${persistenceDelta === 1 ? '' : 's'} ahead than the real race within the ${comparisonHorizon}-lap comparison horizon.`
+    : `NOT YET means the tree estimates ${Math.abs(persistenceDelta).toFixed(1)} fewer or equal lap${Math.abs(persistenceDelta) === 1 ? '' : 's'} ahead than the real race within the ${comparisonHorizon}-lap comparison horizon.`
   const [showBranches, setShowBranches] = useState(false)
   const treeAction = tree.path?.[0]?.action ?? tree.tree?.bestAction ?? '—'
   const pathNodes = []
@@ -231,10 +73,11 @@ function StrategyTreePanel({ tree }) {
       <div><span>ML RECOMMENDATION</span><b className={tree.classifierAction === 'ATTACK' ? 'tree-attack' : tree.classifierAction === 'SAVE' ? 'tree-save' : 'tree-delay'}>{tree.classifierAction ?? '—'}</b><em>lap-chip classifier output</em></div>
       <div><span>RECURSIVE BEST ACTION</span><b className={treeAction === 'ATTACK' ? 'tree-attack' : treeAction === 'SAVE' ? 'tree-save' : 'tree-delay'}>{treeAction}</b><em>tree choice after both-car energy response</em></div>
       {tree.decisionContext && <div><span>RACE-CONTROL GATE</span><b className={tree.decisionContext.overtakeActionsEnabled ? 'tree-save' : 'tree-attack'}>{tree.decisionContext.raceControl}</b><em>{tree.decisionContext.pitDistorted ? 'pit-cycle context · no pass claim' : 'normal overtake window'}</em></div>}
+      {tree.decisionContext?.ruleContext && <div><span>OVERTAKE MODE RULE</span><b className={tree.decisionContext.ruleContext.eventSpecificDataLoaded ? 'tree-save' : 'tree-delay'}>{tree.decisionContext.ruleContext.eventSpecificDataLoaded ? 'EVENT APPENDIX LOADED' : 'APPENDIX NOT LOADED'}</b><em>{tree.decisionContext.ruleContext.application === 'TRACK_DISTANCE_ALIGNMENT_REQUIRED' ? 'track-distance alignment required before use' : 'tree uses the modelled analysis window only'}</em></div>}
     </div>
     <div className="dt-tree-summary">
       <div><b>{tree.expectedLeadLaps.toFixed(1)}</b><span>TREE-ESTIMATED LAPS AHEAD</span></div>
-      <div><b>{tree.actualLeadLaps}</b><span>REAL-RACE LAPS AHEAD</span></div>
+      <div><b>{tree.actualLeadLaps}</b><span>REAL LAPS AHEAD · CAPPED AT {comparisonHorizon}</span></div>
       <div><b>{tree.actualFinishPosition ? `P${tree.actualFinishPosition}` : '—'}</b><span>REAL FINISH POSITION</span></div>
       <div><b className={tree.success ? 'positive' : ''}>{tree.success ? 'BETTER' : 'NOT YET'}</b><span>{persistenceDelta >= 0 ? '+' : ''}{persistenceDelta.toFixed(1)} LAPS VS REAL</span></div>
     </div>
@@ -247,6 +90,17 @@ function StrategyTreePanel({ tree }) {
           <em>{item.estimatedProbability == null ? 'OUTSIDE HORIZON' : `REAL ${item.observed ? 'YES' : 'NO'}`}</em>
         </div>)}
       </div>
+    </div>}
+    {tree.socSensitivity?.cases?.length > 0 && <div className="dt-sensitivity">
+      <div className="dt-persistence-head"><span>MODELLED ENERGY SENSITIVITY / ±{tree.socSensitivity.perturbationMj?.toFixed(2)} MJ</span><em>{tree.socSensitivity.stableRecommendation ? 'RECOMMENDATION STABLE' : 'RECOMMENDATION CHANGES'}</em></div>
+      <div className="dt-sensitivity-grid">
+        {tree.socSensitivity.cases.map((item) => <div className="dt-sensitivity-cell" key={item.id}>
+          <span>{item.label}</span>
+          <b className={item.recommendedAction === 'ATTACK' ? 'tree-attack' : item.recommendedAction === 'SAVE' ? 'tree-save' : 'tree-delay'}>{item.recommendedAction ?? '—'}</b>
+          <em>SoC {item.attackerStartSocMj.toFixed(2)} / defender {item.defenderStartSocMj.toFixed(2)} MJ · {item.expectedLeadLaps.toFixed(1)}L</em>
+        </div>)}
+      </div>
+      <p>{tree.socSensitivity.note}</p>
     </div>}
     <div className="dt-tree-path">
       {tree.path.map((step) => <div className="dt-tree-step" key={`${step.lap}-${step.action}`}>
@@ -323,7 +177,7 @@ export function useRaceEngine(sel, activeTab = 'STRATEGY') {
   const [events, setEvents] = useState([])
 
   useEffect(() => {
-    if (activeTab !== 'OVERTAKE') return undefined
+    if (activeTab !== 'VALIDATION') return undefined
     let live = true
     fetchModelReport().then((r) => { if (live) setReport(r) }).catch(() => { if (live) setReport(null) })
     return () => { live = false }
@@ -405,7 +259,7 @@ function observedOutcomeSummary(row) {
   return row.passedNow ? `PASSED L${Number(row.lap) + 1} · NOT HELD` : 'NO DURABLE PASS'
 }
 
-export function OvertakeTab({ sel, decision, preds, report }) {
+export function OvertakeTab({ sel, decision, preds }) {
   const dp = decision.data
   if (decision.loading) return <div className="lx-loading"><span className="lx-spinner" />LOADING DECISION POINTS</div>
   if (decision.error) return <p className="lx-empty">No decision points for {sel.year} R{sel.round} {sel.session}. {decision.error}</p>
@@ -415,31 +269,25 @@ export function OvertakeTab({ sel, decision, preds, report }) {
   if (!dp) return <div className="lx-loading"><span className="lx-spinner" />LOADING DECISION POINTS</div>
 
   const rows = dp.rows ?? []
+  const ruleContext = dp.ruleContext ?? {}
+  const eventRulesLoaded = Boolean(ruleContext.eventSpecificDataLoaded)
+  const analysisWindowNote = eventRulesLoaded
+    ? `FIA event appendix loaded: detection gap ${ruleContext.officialDetectionGapS ?? '—'}s; detection/activation line use still needs matching track-distance data.`
+    : (ruleContext.status === 'EVENT_APPENDIX_REQUIRED'
+      ? 'The 2026 FIA detection/activation appendix is not loaded here; this is a modelled analysis window, not an official event rule.'
+      : 'Historical sessions use this derived battle window for comparable analysis; it is not a claim about the historical DRS rule.')
   const scored = rows.map((r, i) => ({ ...r, pred: preds?.[i] })).filter((r) => r.pred)
   const agree = scored.filter((r) => r.pred.label === r.label).length
   const accuracy = scored.length ? Math.round((agree / scored.length) * 100) : null
   const lc = dp.labelCounts ?? {}
   const total = rows.length || 1
 
-  const trainYears = report?.temporalSplit?.trainYears ?? []
-  const testYears = report?.temporalSplit?.testYears ?? []
-  const holdAcc = report?.testAccuracy != null ? Math.round(report.testAccuracy * 100) : null
-  const tc = report?.classCounts?.test ?? {}
-  const tcTotal = Object.values(tc).reduce((a, b) => a + b, 0)
-  const majKey = Object.keys(tc).reduce((m, k) => ((tc[k] ?? 0) > (tc[m] ?? -1) ? k : m), Object.keys(tc)[0] ?? 'SAVE')
-  const baseline = tcTotal ? Math.round(((tc[majKey] ?? 0) / tcTotal) * 100) : null
-  const inSample = trainYears.includes(sel.year)
-  const heldOutRaces = report?.testByRace ?? []
-  const holdMacroF1 = report?.testMacroF1 != null ? Math.round(report.testMacroF1 * 100) : null
-  const alwaysSave = report?.baselines?.alwaysSaveAccuracy != null ? Math.round(report.baselines.alwaysSaveAccuracy * 100) : null
-  const gapOnly = report?.baselines?.gapOnlyAccuracy != null ? Math.round(report.baselines.gapOnlyAccuracy * 100) : null
-  const ci = report?.testUncertainty
-  const beatsBaseline = report?.modelVsAlwaysSave?.beatsBaseline
 
   return <div className="dt-overtake">
     <section className="ov-panel">
       <div className="ov-panel-head"><span>DETECTED DECISION POINTS / {dp.eventName?.toUpperCase()}</span><span><Badge tone="derived">GAP + SPEED-TRAP</Badge> <Badge tone="real">{dp.lappingExcludedCount ?? 0} LAPPING EXCLUDED</Badge></span></div>
-      <div className="dt-bignum"><strong>{rows.length}</strong><span>BATTLES DETECTED · {dp.totalLaps} LAPS · MAX GAP {dp.maxGapThresholdS}s</span></div>
+      <div className="dt-bignum"><strong>{rows.length}</strong><span>BATTLES DETECTED · {dp.totalLaps} LAPS · ANALYSIS WINDOW {dp.maxGapThresholdS}s</span></div>
+      <div className="ov-factor dt-rule-disclosure"><span>Overtake window <Badge tone={eventRulesLoaded ? 'real' : 'simulated'}>{eventRulesLoaded ? 'EVENT APPENDIX' : 'MODELLED FILTER'}</Badge></span><b>{eventRulesLoaded ? 'EVENT-SPECIFIC CONTEXT' : (ruleContext.status === 'EVENT_APPENDIX_REQUIRED' ? 'NOT EVENT-SPECIFIC' : 'HISTORICAL PROXY')}</b><em>{analysisWindowNote}</em></div>
       <div className="dt-distbar">
         {STRATEGY_ORDER.map((k) => <i key={k} style={{ width: `${((lc[k] ?? 0) / total) * 100}%`, background: STRATEGY_COLORS[k] }} title={`${k}: ${lc[k] ?? 0}`} />)}
       </div>
@@ -451,11 +299,57 @@ export function OvertakeTab({ sel, decision, preds, report }) {
         <b>{accuracy == null ? '—' : `${accuracy}%`}</b>
         <span>{agree} of {scored.length} decision points · predicted label matches the observed outcome</span>
       </div>
-      <p className="ov-notes">Labels are modelled outcomes: ATTACK = pass made and held {dp.holdLaps} laps, DELAY = durable pass within {dp.holdLaps} laps, SAVE = no durable pass. Lapping/backmarker candidates are excluded before training ({dp.lappingExcludedCount ?? 0} in this race). Trained on {trainYears[0]}–{trainYears[trainYears.length - 1]}, validated on an unseen {testYears.join(', ')} holdout at {holdAcc == null ? '—' : `${holdAcc}%`} accuracy against a {baseline == null ? '—' : `${baseline}%`} always-{majKey} baseline. {inSample ? `Agreement above for ${sel.year} is in-sample (inside the training window); the ${testYears.join(', ')} holdout is the honest generalisation figure.` : `Agreement above for ${sel.year} is on the held-out season.`}</p>
+      <p className="ov-notes">Labels are modelled outcomes: ATTACK = pass made and held {dp.holdLaps} laps, DELAY = durable pass within {dp.holdLaps} laps, SAVE = no durable pass. Lapping/backmarker candidates are excluded before training ({dp.lappingExcludedCount ?? 0} in this race). This section describes the selected race only; global unseen-season validation is shown separately under VALIDATION.</p>
     </section>
 
-    {heldOutRaces.length > 0 && <section className="ov-panel dt-validation-panel">
+    <section className="ov-panel dt-dp-panel">
+      <div className="ov-panel-head"><span>DECISION POINTS · MODEL PROBABILITIES</span><b>{scored.length} ROWS</b></div>
+      <div className="dt-dp-head"><span>LAP</span><span>ATTACKER → DEFENDER</span><span>GAP</span><span>Δ SPD</span><span>MODEL</span><span>TRUTH / OBSERVED</span></div>
+      <div className="dt-dp-list">
+        {scored.map((r, i) => {
+          const hit = r.pred.label === r.label
+          return <div className={`dt-dp-row ${hit ? 'hit' : 'miss'}`} key={`${r.lap}-${r.driver}-${r.defender}-${i}`}>
+            <span className="dt-lap">L{r.lap}</span>
+            <span className="dt-matchup"><b>{r.driver}</b>→{r.defender}<em>P{r.position}</em></span>
+            <span className="dt-cell">{num(r.gapS, 2)}s</span>
+            <span className="dt-cell">{r.speedDeltaKph == null ? '—' : `${r.speedDeltaKph > 0 ? '+' : ''}${r.speedDeltaKph} km/h`}</span>
+            <span className="dt-model">
+              <b style={{ color: STRATEGY_COLORS[r.pred.label] }}>{r.pred.label}</b>
+              <ProbBar probabilities={r.pred.probabilities} height={5} />
+            </span>
+            <span className="dt-truth" style={{ color: STRATEGY_COLORS[r.label] }}><b>{r.label}</b><small>{observedOutcomeSummary(r)}</small></span>
+          </div>
+        })}
+      </div>
+    </section>
+  </div>
+}
+
+// ─── VALIDATION tab: global held-out model and replay evaluation ─────────────
+
+export function ValidationTab({ report }) {
+  if (!report) return <div className="lx-loading"><span className="lx-spinner" />LOADING VALIDATION REPORT</div>
+  const trainYears = report.temporalSplit?.trainYears ?? []
+  const testYears = report.temporalSplit?.testYears ?? []
+  const heldOutRaces = report.testByRace ?? []
+  const holdAcc = report.testAccuracy != null ? Math.round(report.testAccuracy * 100) : null
+  const holdMacroF1 = report.testMacroF1 != null ? Math.round(report.testMacroF1 * 100) : null
+  const alwaysSave = report.baselines?.alwaysSaveAccuracy != null ? Math.round(report.baselines.alwaysSaveAccuracy * 100) : null
+  const gapOnly = report.baselines?.gapOnlyAccuracy != null ? Math.round(report.baselines.gapOnlyAccuracy * 100) : null
+  const ci = report.testUncertainty
+  const beatsBaseline = report.modelVsAlwaysSave?.beatsBaseline
+  const modelComparison = Object.entries(report.modelComparison ?? {})
+  const replayPersistence = report.replayPersistence
+  const replayModels = Object.entries(replayPersistence?.models ?? {})
+  const primaryReplay = replayPersistence?.models?.RandomForestClassifier ?? replayModels[0]?.[1]
+  const durability = report.passDurabilityComponent
+  const development = report.developmentSelection
+  const developmentModels = Object.entries(development?.models ?? {})
+
+  return <div className="dt-validation-page">
+    <section className="ov-panel dt-validation-panel">
       <div className="ov-panel-head"><span>HELD-OUT RACE VALIDATION / {testYears.join(', ')}</span><Badge tone="real">UNSEEN DATA</Badge></div>
+      <p className="ov-notes">The selected race controls the Overtake page. This page reports the global frozen evaluation: the model trains on {trainYears[0]}–{trainYears[trainYears.length - 1]} and is tested only on completed {testYears.join(', ')} races.</p>
       <div className="dt-validation-summary">
         <div><b>{holdAcc == null ? '—' : `${holdAcc}%`}</b><span>MODEL ACCURACY</span></div>
         <div><b>{holdMacroF1 == null ? '—' : `${holdMacroF1}%`}</b><span>MACRO F1</span></div>
@@ -478,29 +372,83 @@ export function OvertakeTab({ sel, decision, preds, report }) {
           <span>{race.gapOnlyAccuracy == null ? '—' : `${Math.round(race.gapOnlyAccuracy * 100)}%`}</span>
         </div>)}
       </div>
-      <p className="ov-notes">These are classification metrics for each unseen race. The model is compared with always-SAVE and a transparent gap-only rule (ATTACK at ≤0.70s, DELAY at ≤1.20s, otherwise SAVE). They do not claim that a retrospective replay changes the real race; persistence and counterfactual results are scored separately in Strategy.</p>
+      <p className="ov-notes">These are classification metrics for each unseen race. They do not claim that a retrospective replay changes the real race; persistence and counterfactual results are scored separately below.</p>
+    </section>
+
+    {modelComparison.length > 0 && <section className="ov-panel dt-model-panel">
+      <div className="ov-panel-head"><span>MODEL BENCHMARKS / SAME 2026 HOLDOUT</span><Badge tone="derived">FROZEN SPLIT</Badge></div>
+      <div className="dt-model-head"><span>MODEL</span><span>ACCURACY</span><span>MACRO F1</span><span>STATUS</span></div>
+      {modelComparison.map(([name, metrics]) => <div className="dt-model-row" key={name}>
+        <span>{modelName(name)}</span>
+        <b>{Math.round(metrics.accuracy * 100)}%</b>
+        <b>{Math.round(metrics.macroF1 * 100)}%</b>
+        <span className={metrics.production ? 'positive' : ''}>{metrics.production ? 'PRODUCTION CANDIDATE' : 'BENCHMARK ONLY'}</span>
+      </div>)}
+      <p className="ov-notes">All candidates use the same v5 features, 2018–2025 training window, and unseen 2026 races. Production selection is not based on raw accuracy alone.</p>
     </section>}
 
-    <section className="ov-panel dt-dp-panel">
-      <div className="ov-panel-head"><span>DECISION POINTS · MODEL PROBABILITIES</span><b>{scored.length} ROWS</b></div>
-      <div className="dt-dp-head"><span>LAP</span><span>ATTACKER → DEFENDER</span><span>GAP</span><span>Δ SPD</span><span>MODEL</span><span>TRUTH / OBSERVED</span></div>
-      <div className="dt-dp-list">
-        {scored.map((r, i) => {
-          const hit = r.pred.label === r.label
-          return <div className={`dt-dp-row ${hit ? 'hit' : 'miss'}`} key={`${r.lap}-${r.driver}-${r.defender}-${i}`}>
-            <span className="dt-lap">L{r.lap}</span>
-            <span className="dt-matchup"><b>{r.driver}</b>→{r.defender}<em>P{r.position}</em></span>
-            <span className="dt-cell">{num(r.gapS, 2)}s</span>
-            <span className="dt-cell">{r.speedDeltaKph == null ? '—' : `${r.speedDeltaKph > 0 ? '+' : ''}${r.speedDeltaKph} km/h`}</span>
-            <span className="dt-model">
-              <b style={{ color: STRATEGY_COLORS[r.pred.label] }}>{r.pred.label}</b>
-              <ProbBar probabilities={r.pred.probabilities} height={5} />
-            </span>
-            <span className="dt-truth" style={{ color: STRATEGY_COLORS[r.label] }}><b>{r.label}</b><small>{observedOutcomeSummary(r)}</small></span>
-          </div>
-        })}
+    {developmentModels.length > 0 && <section className="ov-panel dt-model-panel">
+      <div className="ov-panel-head"><span>MODEL SELECTION / {development.temporalSplit?.developmentYears?.join('–')} DEVELOPMENT WINDOW</span><Badge tone="derived">2026 EXCLUDED</Badge></div>
+      <p className="ov-notes">Candidates are compared using {development.temporalSplit?.fitYears?.[0]}–{development.temporalSplit?.fitYears?.at(-1)} training and only {development.temporalSplit?.developmentYears?.join('–')} for development. The final 2026 holdout is intentionally excluded from this selection window.</p>
+      <div className="dt-model-head"><span>MODEL</span><span>ACCURACY</span><span>MACRO F1</span><span>STATUS</span></div>
+      {developmentModels.map(([name, metrics]) => <div className="dt-model-row" key={name}>
+        <span>{modelName(name)}</span>
+        <b>{Math.round(metrics.accuracy * 100)}%</b>
+        <b>{Math.round(metrics.macroF1 * 100)}%</b>
+        <span>DEVELOPMENT RESULT</span>
+      </div>)}
+      <p className="ov-notes">Always-SAVE accuracy: {Math.round((development.baselines?.alwaysSaveAccuracy ?? 0) * 100)}%. This is a selection aid, not final evidence of real-race benefit.</p>
+    </section>}
+
+    {durability?.horizons?.length > 0 && <section className="ov-panel dt-durability-panel">
+      <div className="ov-panel-head"><span>PASS-DURABILITY COMPONENT / HELD-OUT 2026</span><Badge tone="derived">BENCHMARK ONLY</Badge></div>
+      <p className="ov-notes">Conditional on an immediate real on-track pass, this separate model estimates whether the gained position survives each horizon. It is not an input to the action classifier or tactical replay yet.</p>
+      <div className="dt-durability-head"><span>HORIZON</span><span>TEST PASSES</span><span>REAL HOLD</span><span>F1</span><span>BRIER</span><span>REF. BRIER</span><span>AUC</span></div>
+      {durability.horizons.map((item) => <div className="dt-durability-row" key={item.horizonLaps}>
+        <b>{item.horizonLaps} LAP{item.horizonLaps === 1 ? '' : 'S'}</b>
+        <span>{item.testRows}</span>
+        <span>{item.testObservedHoldRate == null ? '—' : `${Math.round(item.testObservedHoldRate * 100)}%`}</span>
+        <span>{item.f1 == null ? '—' : `${Math.round(item.f1 * 100)}%`}</span>
+        <span>{item.brier == null ? '—' : item.brier.toFixed(3)}</span>
+        <span>{item.constantRateBrier == null ? '—' : item.constantRateBrier.toFixed(3)}</span>
+        <span>{item.rocAuc == null ? '—' : item.rocAuc.toFixed(3)}</span>
+      </div>)}
+      <p className="ov-notes">Brier is probability error (lower is better); REF. BRIER is the historical constant-rate reference; AUC measures whether durable and non-durable passes are ranked apart (0.5 is chance). The component remains diagnostic until it beats that simple reference and is integrated without leakage.</p>
+    </section>}
+
+    {replayModels.length > 0 && <section className="ov-panel dt-persistence-panel">
+      <div className="ov-panel-head"><span>HELD-OUT REPLAY / POSITION DURABILITY</span><Badge tone="real">2026 · {replayPersistence.holdout?.treeHorizonLaps ?? 6}-LAP HORIZON</Badge></div>
+      <p className="ov-notes">This evaluates completed immediate on-track passes only. Each model’s predicted first action is sent through the same two-car six-lap tactical replay and compared with the real race over the same capped horizon.</p>
+      <div className="dt-model-head"><span>MODEL</span><span>REAL LAPS</span><span>EST. LAPS</span><span>DELTA</span><span>BETTER</span></div>
+      {replayModels.map(([name, metrics]) => <div className="dt-model-row dt-persistence-row" key={name}>
+        <span>{modelName(name)}</span>
+        <b>{metrics.meanObservedLeadLaps == null ? '—' : metrics.meanObservedLeadLaps.toFixed(1)}</b>
+        <b>{metrics.meanModelExpectedLeadLaps == null ? '—' : metrics.meanModelExpectedLeadLaps.toFixed(1)}</b>
+        <b className={metrics.meanModelVsObservedDelta > 0 ? 'positive' : ''}>{metrics.meanModelVsObservedDelta == null ? '—' : `${metrics.meanModelVsObservedDelta > 0 ? '+' : ''}${metrics.meanModelVsObservedDelta.toFixed(1)}`}</b>
+        <span>{metrics.modelEstimatedBetterRate == null ? '—' : `${Math.round(metrics.modelEstimatedBetterRate * 100)}%`}</span>
+      </div>)}
+      <div className="dt-replay-races">
+        <div className="dt-replay-race-head"><span>RACE</span><span>REAL</span><span>EST.</span><span>DELTA</span></div>
+        {(replayModels[0]?.[1]?.byRace ?? []).map((race) => <div className="dt-replay-race-row" key={race.round}>
+          <span>2026 {race.eventName}</span><span>{race.meanObservedLeadLaps.toFixed(1)}</span><span>{race.meanModelExpectedLeadLaps.toFixed(1)}</span><span className={race.meanModelVsObservedDelta > 0 ? 'positive' : ''}>{race.meanModelVsObservedDelta > 0 ? '+' : ''}{race.meanModelVsObservedDelta.toFixed(1)}</span>
+        </div>)}
       </div>
-    </section>
+      {primaryReplay?.byDriver?.length > 0 && <div className="dt-replay-detail">
+        <div className="dt-replay-detail-title">RANDOM FOREST / BY ATTACKING DRIVER</div>
+        <div className="dt-replay-driver-head"><span>DRIVER</span><span>POINTS</span><span>REAL LAPS</span><span>EST. LAPS</span><span>DELTA</span></div>
+        {primaryReplay.byDriver.map((driver) => <div className="dt-replay-driver-row" key={driver.driver}>
+          <b>{driver.driver}</b><span>{driver.rows}</span><span>{driver.meanObservedLeadLaps.toFixed(1)}</span><span>{driver.meanModelExpectedLeadLaps.toFixed(1)}</span><span className={driver.meanModelVsObservedDelta > 0 ? 'positive' : ''}>{driver.meanModelVsObservedDelta > 0 ? '+' : ''}{driver.meanModelVsObservedDelta.toFixed(1)}</span>
+        </div>)}
+      </div>}
+      {primaryReplay?.byHorizon?.length > 0 && <div className="dt-replay-detail">
+        <div className="dt-replay-detail-title">RANDOM FOREST / DURABILITY HORIZON</div>
+        <div className="dt-replay-horizon-head"><span>HORIZON</span><span>POINTS</span><span>REAL HOLD RATE</span><span>EST. PROBABILITY</span><span>DELTA</span></div>
+        {primaryReplay.byHorizon.map((item) => <div className="dt-replay-horizon-row" key={item.horizon}>
+          <b>{item.horizon} LAP{item.horizon === 1 ? '' : 'S'}</b><span>{item.rows}</span><span>{Math.round(item.observedHoldRate * 100)}%</span><span>{item.meanEstimatedProbability == null ? '—' : `${Math.round(item.meanEstimatedProbability * 100)}%`}</span><span className={item.probabilityDelta > 0 ? 'positive' : ''}>{item.probabilityDelta == null ? '—' : `${item.probabilityDelta > 0 ? '+' : ''}${Math.round(item.probabilityDelta * 100)}%`}</span>
+        </div>)}
+      </div>}
+      <p className="ov-notes">Positive delta means the estimate is above the real capped persistence. It remains a modelled estimate, not proof that the real race would have changed.</p>
+    </section>}
   </div>
 }
 
@@ -552,13 +500,19 @@ export function EnergyTab({ sel, energy }) {
   if (energy.loading) return <div className="lx-loading"><span className="lx-spinner" />COMPUTING 2026-REG ENERGY PROJECTION FOR {sel.driver}…</div>
   if (energy.error) return <p className="lx-empty">Energy projection failed for {sel.driver}: {energy.error}</p>
   const d = energy.data
+  // When entering Energy repeatedly, the hook can briefly clear the previous
+  // payload before the next request marks itself loading. Render a stable
+  // loading state instead of dereferencing null and blanking the app.
+  if (!d) return <div className="lx-loading"><span className="lx-spinner" />COMPUTING 2026-REG ENERGY PROJECTION FOR {sel.driver}…</div>
   const laps = d.laps ?? []
   const g = d.gates ?? {}
   const za = g.zoneAlignment ?? {}, ce = g.ceilings ?? {}, ct = g.crossTrackConsistency ?? {}
+  const rule = d.regulation ?? {}
+  const uses2026Defaults = rule.uses2026Defaults === true
 
   return <div className="dt-energy">
     <section className="ov-panel">
-      <div className="ov-panel-head"><span>ENERGY PROJECTION / {d.driver} · {d.year} R{d.round}</span><Badge tone="simulated">MODELLED · 2026 REG PHYSICS</Badge></div>
+      <div className="ov-panel-head"><span>ENERGY PROJECTION / {d.driver} · {d.year} R{d.round}</span><Badge tone="simulated">{uses2026Defaults ? 'MODELLED · FIA 2026 DEFAULTS' : 'MODELLED · HISTORICAL SURROGATE'}</Badge></div>
       <div className="ov-energy-list">
         <div><b>{num(ct.meanDeployMjPerLap, 2)} MJ</b><span>DEPLOY / LAP</span><strong>ERS-K OUTPUT</strong></div>
         <div><b>{num(ct.meanHarvestMjPerLap, 2)} MJ</b><span>HARVEST / LAP</span><strong>REGEN UNDER BRAKING</strong></div>
@@ -568,7 +522,9 @@ export function EnergyTab({ sel, energy }) {
       <SocChart laps={laps} />
       <div className="ov-panel-head second"><span>PER-LAP DEPLOY vs HARVEST</span><Badge tone="simulated">MODELLED</Badge></div>
       <DeployHarvestChart laps={laps} />
-      <p className="ov-notes">Projected from real speed/throttle/brake telemetry under cited 2026 power-unit limits — never measured team data. Total clipping this race: {num(ct.totalClipSeconds, 1)} s.</p>
+      <p className="ov-notes">{uses2026Defaults
+        ? 'Projected from real speed/throttle/brake telemetry under published global 2026 limits — never measured team data. Competition-specific Overtake, Recharge and power-curve settings remain unloaded.'
+        : 'Projected from real speed/throttle/brake telemetry with a modelled surrogate. This historical view is not presented as 2026 FIA compliance.'} Total clipping this race: {num(ct.totalClipSeconds, 1)} s.</p>
     </section>
 
     <section className="ov-panel dt-gates">
@@ -582,7 +538,7 @@ export function EnergyTab({ sel, energy }) {
       </div>
 
       <div className="dt-gatecard">
-        <div className="dt-gatehead"><b>02 · REGULATORY CEILINGS</b><GatePill pass={ce.pass} /></div>
+        <div className="dt-gatehead"><b>02 · GLOBAL FIA CEILINGS</b><GatePill pass={ce.pass} /></div>
         <div className="dt-gaterow"><span>Max harvest / lap (cap {ce.harvestCapMj} MJ)</span><strong>{mj(ce.maxHarvestPerLapMj)}</strong></div>
         <div className="dt-gaterow"><span>Max SoC swing (window {ce.socWindowMj} MJ)</span><strong>{mj(ce.maxSocSwingMj)}</strong></div>
         <p>{ce.description}</p>
@@ -596,7 +552,8 @@ export function EnergyTab({ sel, energy }) {
         <p>{ct.description}</p>
       </div>
 
-      <div className="ov-panel-head second"><span>REGULATION CITATIONS</span><Badge tone="real">FIA 2026</Badge></div>
+      <div className="ov-panel-head second"><span>REGULATION CITATIONS</span><Badge tone="real">{uses2026Defaults ? 'FIA 2026 · ISSUE 20' : 'MODELLED / ERA PENDING'}</Badge></div>
+      {rule.note && <p className="ov-notes">{rule.note}</p>}
       {Object.entries(d.citations ?? {}).map(([k, v]) => <div className="ov-factor" key={k}>
         <span>{k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase())}</span>
         <b className="positive">{v}</b>
@@ -644,14 +601,6 @@ export function StrategyTab({ sel, decision, preds, energy }) {
   const replayKey = focus
     ? `${sel.year}-${sel.round}-${sel.session}-${focus.lap}-${focus.driver}-${focus.defender}`
     : null
-  const localTree = useMemo(() => buildStrategyTree({
-    focus,
-    rows: allScored,
-    energyLaps: eLaps,
-    totalLaps: dp?.totalLaps ?? 0,
-    holdLaps: dp?.holdLaps ?? 6,
-    finishPositions: dp?.finishPositions,
-  }), [focus, allScored, eLaps, dp?.totalLaps, dp?.holdLaps, dp?.finishPositions])
   const [replay, setReplay] = useState({ loading: false, data: null, error: null, focusKey: null })
   const [defenderEnergy, setDefenderEnergy] = useState(null)
 
@@ -680,6 +629,7 @@ export function StrategyTab({ sel, decision, preds, energy }) {
         },
         year: sel.year,
         regulationEra: Number(sel.year) >= 2026 ? '2026' : '2018_2025',
+        ruleContext: dp?.ruleContext,
       })
     }).then((data) => {
       if (!cancelled && data) setReplay({ loading: false, data, error: null, focusKey: replayKey })
@@ -690,11 +640,11 @@ export function StrategyTab({ sel, decision, preds, energy }) {
   }, [focus, replayKey, allScored, eLaps, dp?.totalLaps, dp?.holdLaps, dp?.finishPositions, sel.driver, sel.year, sel.round, sel.session])
 
   // Never show a tree for a different focus while the backend is recomputing.
-  // The local calculation is only a fallback after the current request fails;
-  // this prevents the one-frame value swap seen when changing laps.
+  // The backend owns the replay, its regulation configuration, and the shared
+  // energy transition; the browser never substitutes an alternative tree.
   const replayPending = Boolean(replayKey && replay.focusKey !== replayKey) || replay.loading
   const tree = replay.focusKey === replayKey
-    ? replay.data ?? (replay.error ? localTree : null)
+    ? replay.data
     : null
 
   if (decision.loading) return <div className="lx-loading"><span className="lx-spinner" />BUILDING FUSED DECISION…</div>
@@ -725,7 +675,7 @@ export function StrategyTab({ sel, decision, preds, energy }) {
           {STRATEGY_ORDER.map((k) => <span key={k}><i style={{ background: STRATEGY_COLORS[k] }} />{k} {pct(p[k] * 100, 0)}</span>)}
         </div>
         <div className="ov-panel-head second"><span>WHAT THE MODEL SEES</span><b>FEATURES</b></div>
-        <div className="ov-factor"><span>Gap to car ahead <Badge tone="derived">DERIVED</Badge></span><b className={focus.gapS <= 1 ? 'positive' : 'negative'}>{num(focus.gapS, 3)} s</b><em>{focus.gapS <= 1 ? 'inside DRS/override range' : 'outside range'}</em></div>
+        <div className="ov-factor"><span>Gap to car ahead <Badge tone="derived">DERIVED</Badge></span><b className={focus.gapS <= 1 ? 'positive' : 'negative'}>{num(focus.gapS, 3)} s</b><em>{focus.gapS <= dp.maxGapThresholdS ? 'inside analysis window' : 'outside analysis window'}</em></div>
         <div className="ov-factor"><span>Speed-trap delta <Badge tone="real">REAL</Badge></span><b className={focus.speedDeltaKph > 0 ? 'positive' : 'negative'}>{focus.speedDeltaKph == null ? '—' : `${focus.speedDeltaKph > 0 ? '+' : ''}${focus.speedDeltaKph} km/h`}</b><em>{focus.driver || 'attacker'} vs {focus.defender || 'defender'}</em></div>
         <div className="ov-factor"><span>Closing rate <Badge tone="derived">DERIVED</Badge></span><b>{num(focus.closingRateS, 2)} s/lap</b><em>negative = gaining</em></div>
         <div className="ov-factor"><span>Tyre age differential <Badge tone="real">REAL</Badge></span><b>{num(focus.tyreAgeDiff, 0)} laps</b><em>{focus.attackerCompound} vs {focus.defenderCompound}</em></div>
@@ -789,6 +739,10 @@ export function StrategyTab({ sel, decision, preds, energy }) {
     </div>
 
     {replayPending && <div className="lx-loading dt-tree-loading"><span className="lx-spinner" />RECOMPUTING TREE FOR LAP {focus.lap}…</div>}
+    {!replayPending && replay.focusKey === replayKey && replay.error && <div className="ov-assumption tight dt-tree-loading">
+      REPLAY UNAVAILABLE
+      <p>The browser will not substitute a local tactical calculation. Start the backend replay service and retry this decision point.</p>
+    </div>}
     <StrategyTreePanel tree={tree ? { ...tree, classifierAction: rec } : tree} />
   </div>
 }

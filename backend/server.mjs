@@ -290,6 +290,71 @@ async function analyseEngineer(message, team) {
 // requests and the prefetch script share the same files.
 
 const F1_CACHE_DIR = path.join(root, 'data', 'f1-cache')
+const OVERTAKE_RULE_CONTEXT_PATH = path.join(root, 'data', 'overtake-rule-context.json')
+
+function finiteRuleNumber(value, minimum = 0) {
+  return Number.isFinite(Number(value)) && Number(value) >= minimum
+}
+
+function validateEventRuleContext(entry) {
+  const errors = []
+  if (entry?.eventSpecificDataLoaded !== true) errors.push('eventSpecificDataLoaded must be true')
+  if (!finiteRuleNumber(entry?.officialDetectionGapS, 0)) errors.push('officialDetectionGapS is required')
+  if (!finiteRuleNumber(entry?.detectionLineDistanceM, 0)) errors.push('detectionLineDistanceM is required')
+  if (!finiteRuleNumber(entry?.activationLineDistanceM, 0)) errors.push('activationLineDistanceM is required')
+  if (!finiteRuleNumber(entry?.rechargeLimitMj, 0)) errors.push('rechargeLimitMj is required')
+  if (!entry?.powerLimitProfile || typeof entry.powerLimitProfile !== 'object') errors.push('powerLimitProfile is required')
+  if (!entry?.eventAppendixSource?.url || !entry?.eventAppendixSource?.published) {
+    errors.push('eventAppendixSource.url and eventAppendixSource.published are required')
+  }
+  return { valid: errors.length === 0, errors }
+}
+
+async function ruleContextFor(payload, year, round, session) {
+  // FIA publishes the Overtake Mode detection gap and track lines per event.
+  // Keep a structured registry for those official appendices, but never invent
+  // an exact value for an event which has not been imported yet.
+  let registry
+  try {
+    registry = JSON.parse(await readFile(OVERTAKE_RULE_CONTEXT_PATH, 'utf8'))
+  } catch {
+    registry = { schemaVersion: 'overtake-rule-context.v1', defaults: {}, events: {} }
+  }
+  const era = Number(year) >= 2026 ? '2026' : 'historical'
+  const eventKey = `${year}:${round}:${f1Slug(session)}`
+  const eventEntry = registry.events?.[eventKey]
+  const defaultEntry = registry.defaults?.[era] ?? {}
+  const validation = eventEntry
+    ? validateEventRuleContext(eventEntry)
+    : { valid: false, errors: ['official event appendix not loaded'] }
+  const configured = eventEntry && validation.valid
+    ? eventEntry
+    : eventEntry
+      ? {
+          ...defaultEntry,
+          status: 'EVENT_APPENDIX_INVALID',
+          eventSpecificDataLoaded: false,
+          restrictions: [
+            ...(defaultEntry.restrictions ?? []),
+            'The imported event appendix did not meet the source and field requirements; it is not used.',
+          ],
+        }
+      : defaultEntry
+  return {
+    ...configured,
+    source: registry.source ?? null,
+    eventKey,
+    eventAppendixSource: eventEntry?.eventAppendixSource ?? null,
+    validation: {
+      eventSpecificDataAccepted: Boolean(eventEntry && validation.valid),
+      errors: validation.errors,
+    },
+    analysisWindowGapS: payload.maxGapThresholdS ?? null,
+    application: configured.eventSpecificDataLoaded
+      ? 'TRACK_DISTANCE_ALIGNMENT_REQUIRED'
+      : 'DISCLOSURE_ONLY_UNTIL_EVENT_APPENDIX_LOADED',
+  }
+}
 
 function f1Slug(sessionName) {
   return sessionName.toLowerCase().replace(/\s+/g, '_')
@@ -735,6 +800,9 @@ export async function handler(request, response) {
         ], 600000)
         payload = JSON.parse(out)
       }
+      // Attach current rule metadata at response time so adding an official
+      // event appendix never requires rebuilding historical model features.
+      payload = { ...payload, ruleContext: await ruleContextFor(payload, year, round, session) }
       return json(response, 200, payload)
     } catch {
       return json(response, 404, { error: `no decision points extracted for ${year} round ${round} ${session}` })

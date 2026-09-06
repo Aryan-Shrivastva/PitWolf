@@ -57,10 +57,90 @@ The first alignment slice is now implemented in the working tree:
   multiclass calibration diagnostics, and an explicit model-vs-always-SAVE
   comparison; the Overtake page displays these results and does not call the
   classifier successful when it loses to the baseline.
+- Logistic Regression is now trained as an interpretable benchmark on the same
+  frozen split. It scores 51.35% accuracy / 39.85% macro F1 versus the Random
+  Forest's 58.25% / 45.37%; neither is promoted as a successful policy because
+  the always-SAVE baseline remains 69.79%.
+- A portable serial Gradient Boosting benchmark is now trained on the same
+  frozen split. It scores 58.11% accuracy / 45.57% macro F1, with better
+  calibration but slightly lower accuracy than Random Forest. It remains a
+  benchmark until the downstream position-persistence replay chooses a clear
+  winner; model selection is not based on raw accuracy alone.
+- A held-out replay evaluator now scores all completed 2026 immediate
+  on-track pass points through the deterministic six-lap tree for Random
+  Forest, Logistic Regression, and Gradient Boosting. It reports estimated
+  versus observed persistence per race and keeps raw observed hold duration
+  separate from the horizon-capped comparison, so a full-race hold is not
+  unfairly compared with a six-lap estimate.
+- The global classification and persistence reports now live on a dedicated
+  VALIDATION tab. OVERTAKE is reserved for the currently selected race and
+  driver; the former Legends tab was removed so global holdout results are not
+  mixed into race-specific evidence.
+- The race-specific Overtake view now labels its gap threshold as a modelled
+  analysis filter and discloses that 2026 event-specific detection/activation
+  appendix data is not loaded. It no longer calls the universal 1.2-second
+  filter an official DRS or Overtake Mode rule.
+- `backend/data/overtake-rule-context.json` is now the source-controlled
+  registry for FIA event appendices. It supports a detection gap, detection
+  line, activation line and race-control restrictions per event, but begins
+  empty deliberately: no event-specific value is inferred. The API attaches
+  this context at read time, and the replay marks it disclosure-only until
+  compatible track-distance coordinates are available. An imported appendix is
+  now rejected unless it contains a cited source, detection gap/lines, Recharge
+  limit and power-limit profile; partial event data cannot silently become an
+  eligible Overtake rule.
+- The active 2026 regulation metadata is now pinned to the current published
+  FIA Section B Sporting Issue 08 and Section C Technical Issue 20 (both 05
+  August 2026), rather than the archived 2024 draft documents. The energy view
+  distinguishes a global FIA ceiling check from event-specific compliance:
+  missing Competition power, Recharge, detection and activation settings are
+  disclosed as unloaded rather than fabricated. The legacy browser-only tree,
+  which could have contradicted the shared backend transition at a pit stop,
+  has been removed.
+- The replay now runs a deterministic modelled-SoC sensitivity check alongside
+  the base tree: attacker minus 0.50 MJ, base estimate, and defender plus
+  0.50 MJ. Strategy displays whether the first-action recommendation remains
+  stable across those assumptions. This is a robustness signal only, never a
+  claim that either car's private battery state was observed.
+- The frozen 2026 replay evaluation now reports Random Forest durability by
+  attacking driver and at 1-, 2-, 3-, 5-, and 6-lap horizons, in addition to
+  per-race results and aggregate model comparisons. The horizon table compares
+  the real hold rate with the tree's estimated probability; it is diagnostic
+  calibration evidence, not a claim of an alternate real-race result.
+- Decision-time FastF1 weather context is now available as a reproducible
+  experimental feature group. Its initial frozen-2026 ablation regressed the
+  Random Forest (57.96% accuracy / 45.18% macro F1 versus the 58.25% / 45.37%
+  production baseline), so the active model correctly excludes it while
+  retaining the experiment behind an explicit training flag.
+- Held-out replay evaluation now prepares each race's immutable cleaned rows,
+  matchup history, and two-car surrogate SoC trace once, then reuses them for
+  every benchmark model. The `replay-evaluation.v3` result is score-identical
+  to v2; this is a reproducibility and training-workflow optimisation, not a
+  methodological change.
+- Sigmoid probability calibration is now evaluated with a strict nested
+  temporal split: base model fit on 2018–2024, calibration map fit on 2025,
+  and final evaluation on 2026. It reduced ECE (12.27% to 6.57%) but harmed
+  macro F1 (45.37% to 35.18%) and did not improve persistence, so it remains a
+  benchmark rather than the production candidate.
+- A separate `pass-durability.v1` benchmark now tests only real immediate
+  on-track passes, using the same strict 2018–2025 training / 2026 holdout
+  boundary. One-lap durability is unlearnable because every retained immediate
+  pass necessarily holds for its first lap. At 2–6 laps the component has
+  modest ranking signal (held-out AUC 0.73–0.78), but its Brier error is not
+  better than a historical constant-rate reference. It is therefore displayed
+  as a diagnostic validation result only, and is not used by the action model
+  or tactical tree.
+- Candidate selection now has its own temporal window: 2018–2023 is the fit
+  period and 2024–2025 is the development period (20,125 / 10,306 rows across
+  48 development races). The final 2026 season is excluded from it. Random
+  Forest currently leads this development comparison on accuracy (56.07%) and
+  macro F1 (43.52%), but still does not beat the 73.80% always-SAVE accuracy
+  baseline. The result is therefore evidence against promoting a policy now,
+  rather than a basis for tuning on 2026.
 
-This is a foundation, not completion of the full specification. The real-race
-replay state, exact on-track zone configuration, pit/tyre model, safety-car
-state, full two-car telemetry alignment, and completed unseen-season evaluation
+This is a foundation, not completion of the full specification. Exact
+on-track zone configuration, pit/tyre model, safety-car state, full two-car
+telemetry alignment, and richer all-decision-point unseen-season evaluation
 remain subsequent work items below.
 
 ## Executive verdict
@@ -664,7 +744,7 @@ The current pages fit the project when each has one clear responsibility:
 | Telemetry | Evidence view for speed, throttle, brake, gear, RPM, DRS/Overtake state, lap time, and driver comparison |
 | Energy | Both cars' modelled SoC, deployment, harvesting, clipping, constraints, and remaining response capability |
 | Overtake | Decision-point detection, pass probability, hold/repass probability, and ATTACK/SAVE/DELAY outputs |
-| Legends | REAL, DERIVED, and MODELLED definitions, sources, assumptions, and uncertainty |
+| Validation | Global unseen-2026 classification, model benchmarks, replay persistence, and uncertainty |
 
 These pages are conceptually correct, but they must consume one canonical
 backend replay state. They should not independently calculate energy, gaps,

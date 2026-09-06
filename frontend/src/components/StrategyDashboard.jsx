@@ -14,9 +14,9 @@ import {
   DEFAULT_START_RESERVE_PCT,
 } from '../lib/energyModel'
 import { recommend, feasibilityScore, STRATEGIES, DECISION_ENGINE_VERSION } from '../lib/decisionEngine'
-import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab } from './DecisionTabs'
+import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab, ValidationTab } from './DecisionTabs'
 
-const tabs = ['TRACK', 'TELEMETRY', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'LEGENDS']
+const tabs = ['TRACK', 'TELEMETRY', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'VALIDATION']
 
 const { meta, attacker, defender, distance_m: distance, derived } = scenario
 const atk = scenario.attacker_telemetry
@@ -36,9 +36,6 @@ const energy = computeEnergyTrace({
   throttlePct: atk.throttle_pct,
   brakePct: atk.brake_pct,
 })
-
-const onTrackPasses = scenario.decision_points.filter((point) => point.on_track_pass)
-const excludedPasses = scenario.decision_points.filter((point) => !point.on_track_pass)
 
 // Open on the approach to the heaviest braking zone on the lap, which is the
 // Turn 14 zone the pass was actually made into. Picking it by entry speed rather
@@ -322,41 +319,10 @@ export function StrategyDashboard({ onHome }) {
       )}
 
       {tab === 'OVERTAKE' && (
-        <OvertakeTab sel={raceSel} decision={engine.decision} preds={engine.preds} report={engine.report} />
+        <OvertakeTab sel={raceSel} decision={engine.decision} preds={engine.preds} />
       )}
 
-      {tab === 'LEGENDS' && <div className="ov-legend-grid">
-        <section className="ov-panel">
-          <div className="ov-panel-head"><span>DATA PROVENANCE</span><b>READ THIS FIRST</b></div>
-          <div className="ov-legend-item"><DataBadge tone="real">REAL</DataBadge><p>Loaded from FastF1 official timing and car telemetry: {meta.provenance.real.join(', ')}.</p></div>
-          <div className="ov-legend-item"><DataBadge tone="derived">DERIVED</DataBadge><p>Calculated from those real values: {meta.provenance.derived.join(', ')}.</p></div>
-          <div className="ov-legend-item"><DataBadge tone="simulated">SIMULATED</DataBadge><p>Produced by energy model {ENERGY_MODEL_VERSION}. ERS deployment and battery state of charge are not public and are never presented as measured team data.</p></div>
-          <div className="ov-panel-head second"><span>SESSION COVERAGE</span><DataBadge tone="real">REAL FASTF1</DataBadge></div>
-          <div className="ov-factor"><span>Weather samples</span><b className="positive">{scenario.weather_summary?.samples?.toLocaleString() ?? '—'}</b><em>Air, track, humidity, pressure and wind ranges included.</em></div>
-          <div className="ov-factor"><span>Race-control messages</span><b className="positive">{scenario.race_control?.length ?? 0}</b><em>Flags, DRS notices, safety-car context and lap references where supplied.</em></div>
-        </section>
-        <section className="ov-panel">
-          <div className="ov-panel-head"><span>FASTEST RACE LAPS</span><DataBadge tone="real">REAL TIMING</DataBadge></div>
-          {(scenario.fastest_laps ?? []).slice(0, 5).map((lap, index) => <div className="ov-factor" key={`${lap.Driver}-${lap.LapNumber}`}>
-            <span>#{index + 1} · {lap.Driver} · lap {lap.LapNumber}</span>
-            <b className={lap.Driver === attacker.code ? 'positive' : ''}>{formatLapTime(lap.LapTime)}</b>
-            <em>{lap.Compound ?? 'TYRE N/A'} · tyre life {lap.TyreLife ?? '—'} · speed FL {lap.SpeedFL ?? '—'} km/h</em>
-          </div>)}
-          <div className="ov-panel-head second"><span>DECISION POINTS IN THIS RACE</span><b>OBSERVABLE GROUND TRUTH</b></div>
-          {onTrackPasses.map((point) => <div className="ov-factor" key={point.lap}>
-            <span>Lap {point.lap} · {point.gained_position} took the position</span>
-            <b className="positive">{point.gap_before_s}s before</b>
-            <em>{point.attacker_tyre.compound} {point.attacker_tyre.age_laps}L vs {point.defender_tyre.compound} {point.defender_tyre.age_laps}L</em>
-          </div>)}
-          <p className="ov-notes">
-            {excludedPasses.length} further position swaps (laps {excludedPasses.map((p) => p.lap).join(', ')}) were
-            excluded as pit-stop cycles rather than on-track passes. Counting them would inflate the label set.
-          </p>
-          <p className="ov-notes">
-            Scrub the lap to inspect any point. Every chart, metric and recommendation follows the selected distance.
-          </p>
-        </section>
-      </div>}
+      {tab === 'VALIDATION' && <ValidationTab report={engine.report} />}
 
     </section>
 

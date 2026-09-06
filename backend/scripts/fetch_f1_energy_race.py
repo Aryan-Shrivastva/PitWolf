@@ -4,8 +4,9 @@ gates required by the PitWolf energy-engine spec:
 
 1. zone alignment  — harvest concentrates at high-speed braking, deployment at
                      full throttle;
-2. ceilings        — per-lap harvest <= 8.5 MJ (Art. 5.4.10), SoC swing within
-                     the 4 MJ window (Art. 5.4.9);
+2. global ceilings — per-lap Recharge <= 8.5 MJ (Technical C5.2.10), SoC swing
+                     within the 4 MJ window (Technical C5.2.9). Event-specific
+                     Competition limits are not inferred;
 3. cross-track consistency — per-circuit totals, to be compared across events
                      (the comparison itself is reported by the caller).
 """
@@ -118,6 +119,11 @@ def build_race_energy_payload(year, round_number, session_name, driver):
         harvest_all_mj += summary['harvestMj']
 
     harvest_cap = regs.CONSTANTS['harvest_max_mj_per_lap']['value']
+    uses_2026_rules = int(year) >= 2026
+    regulation_status = (
+        'FIA_DEFAULTS_EVENT_APPENDIX_REQUIRED'
+        if uses_2026_rules else 'HISTORICAL_SURROGATE_NOT_2026_COMPLIANCE'
+    )
     gates = {
         'zoneAlignment': {
             'deployAtFullThrottlePct': round(100.0 * deploy_ft_mj / deploy_all_mj, 1) if deploy_all_mj else None,
@@ -134,7 +140,15 @@ def build_race_energy_payload(year, round_number, session_name, driver):
             'socWindowMj': soc_window,
             'pass': bool(harvests) and float(np.max(harvests)) <= harvest_cap + 1e-6
                     and float(np.max(np.abs(swings))) <= soc_window + 1e-6,
-            'description': 'Per-lap harvest cap (PU TR 5.4.10) and 4 MJ SoC window (PU TR 5.4.9).',
+            'eventSpecificLimitLoaded': False,
+            'description': (
+                'Global FIA 2026 Recharge ceiling (Technical C5.2.10) and 4 MJ SoC window '
+                '(Technical C5.2.9). This is not an event-compliance result: the FIA may '
+                'publish a lower Competition Recharge limit or circuit power curve.'
+                if uses_2026_rules else
+                'A modelled 2026-envelope sanity check only. Historical seasons require their own '
+                'era-specific regulation configuration before any compliance claim.'
+            ),
         },
         'crossTrackConsistency': {
             'meanDeployMjPerLap': round(float(np.mean(deploys)), 3) if deploys else None,
@@ -147,6 +161,20 @@ def build_race_energy_payload(year, round_number, session_name, driver):
 
     return {
         'label': 'MODELLED',
+        'regulation': {
+            'status': regulation_status,
+            'uses2026Defaults': uses_2026_rules,
+            'technicalSource': regs.REGULATION_VERSION['technical_c'],
+            'sportingSource': regs.REGULATION_VERSION['sporting_b'],
+            'eventSpecificLimitsLoaded': False,
+            'note': (
+                'The trace is constrained by published global 2026 ceilings. It does not claim '
+                'Competition-specific Overtake, Recharge or power-curve compliance until the FIA '
+                'event configuration is loaded.'
+                if uses_2026_rules else
+                'Historical trace uses a modelled surrogate and is not a claim of 2026 FIA compliance.'
+            ),
+        },
         'driver': driver,
         'year': year,
         'round': round_number,
