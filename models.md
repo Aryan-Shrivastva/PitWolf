@@ -33,12 +33,15 @@ The Random Forest predicts `ATTACK`, `DELAY`, or `SAVE` from the features availa
 
 The current implementation uses a class-balanced Random Forest with 400 trees, bounded depth, and a minimum leaf size. Its probabilities are passed to the recursive strategy tree, where they are combined with energy and race-context rules.
 
-Candidate choice now uses an earlier development window rather than the final
-2026 holdout: fit on 2018–2023, compare on 2024–2025, and keep 2026 untouched
-for the final report. On that development comparison, Random Forest leads the
-currently tested candidates at 56.07% accuracy and 43.52% macro F1, but it
-still trails always-SAVE on raw accuracy (73.80%). It therefore remains a
-research candidate, not a validated deployment policy.
+Candidate choice uses expanding historical validation rather than the final
+2026 holdout: fit through 2021 and validate 2022, then repeat through 2025
+with each next season held out. On the current `decision-point.v6` cache,
+Random Forest leads weighted macro F1 across those folds (43.61%, three of
+four fold wins), ahead of Gradient Boosting (43.00%). Its action thresholds
+are then selected only from historical out-of-fold predictions. The resulting
+held-out-2026 action policy scores 70.85% accuracy / 48.20% macro F1; it still
+trails the always-SAVE baseline on raw accuracy (77.36%), so it remains a
+research benchmark—not a validated live race-command policy.
 
 The model is trained using a strict temporal split. It must never train on the race used for evaluation. The current generated report trains on 2018–2025 and holds out the completed 2026 races.
 
@@ -49,15 +52,15 @@ feature set.
 
 Decision-time FastF1 weather snapshots (air and track temperature, humidity,
 wind, rainfall, and a missing-data flag) are available without future-race
-leakage. On the frozen 2026 holdout, adding them reduced Random Forest from
-58.25% accuracy / 45.37% macro F1 to 57.96% / 45.18%. They therefore remain
-available behind `--include-weather` for future ablations, but are not claimed
-as an improvement or used by the current production candidate.
+leakage. The earlier v5 experiment regressed the Random Forest, so weather is
+excluded from the active feature policy. It remains available behind
+`--include-weather`, but must be re-run on the current v6 labels before any
+new performance claim is made.
 
 ### 2. Logistic Regression — interpretable benchmark
 
 **Status:** Implemented as the next comparison benchmark; Random Forest remains
-the production model until a candidate wins on the frozen holdout and the
+the current research candidate until a model wins on the frozen holdout and the
 downstream persistence metrics.
 
 Logistic Regression will provide a simple linear benchmark. It will show whether the Random Forest is learning useful nonlinear relationships or merely benefiting from straightforward relationships such as smaller gap leading to more attack labels.
@@ -67,7 +70,7 @@ It should use the same features, temporal split, and labels as the Random Forest
 ### 3. Gradient-boosted trees — likely primary tabular challenger
 
 **Status:** Implemented as a portable benchmark with scikit-learn
-`GradientBoostingClassifier`; Random Forest remains the production model
+`GradientBoostingClassifier`; Random Forest remains the current research candidate
 until a candidate wins on the frozen holdout and downstream persistence.
 
 The preferred candidates are XGBoost, if the dependency is available, or scikit-learn HistGradientBoosting as a portable alternative.
@@ -90,12 +93,33 @@ The recursive tree uses action probabilities, so a prediction of 70% should beha
 Calibration is important for risk-reward decisions, position durability, and opponent response. It is separate from choosing the most accurate class.
 
 The current sigmoid experiment fits its Random Forest on 2018–2024, learns
-the calibration map only from 2025, and evaluates only on 2026. It improved
-ECE from 12.27% to 6.57%, but reduced macro F1 from 45.37% to 35.18% and its
-held-out replay persistence delta was slightly worse (−4.2888 vs −4.2742
-laps). It is therefore retained as an honest benchmark only.
+the calibration map only from 2025, and evaluates only on 2026. Under the
+current v6 cache it lowers ECE from 20.99% to 8.14%, but reduces macro F1 from
+48.20% to 37.75%. It is therefore retained as an honest benchmark only.
 
-### 5. Pass-durability component — separate conditional benchmark
+### 5. Immediate-pass component — descriptive benchmark
+
+**Status:** Implemented for held-out evaluation only; not used by the action
+classifier or tactical tree.
+
+This binary model estimates whether a real immediate on-track pass was
+observed from the causal battle context. It is useful for separating the
+question *is a pass occurring at this point?* from the later question *will
+the gained position survive?*
+
+It is deliberately not a causal action-effect model. A positive row reflects
+the real driver's energy deployment, defensive response, and race environment;
+it cannot tell us what would have happened had that driver instead saved or
+delayed. It must improve probability calibration and gain a defensible causal
+action design before it can affect the tree.
+
+The current calibrated re-run fits the underlying component through 2024,
+fits only a sigmoid probability map on 2025, and then evaluates the untouched
+2026 holdout. Its immediate-pass Brier error improves from 0.154 to 0.096 and
+its AUC is 0.783. This is useful probability calibration, but it remains an
+observational benchmark rather than a causal action-effect model.
+
+### 6. Pass-durability component — separate conditional benchmark
 
 **Status:** Implemented for held-out evaluation only; not used by the action
 classifier or tactical tree.
@@ -119,12 +143,17 @@ Brier probability error. It is therefore shown as a transparent diagnostic
 benchmark, and it must not yet change a tree branch, an overtake
 recommendation, or a counterfactual claim.
 
+The same pre-2026 sigmoid calibration protocol improves held-out Brier error
+for the 2, 3, 5, and 6-lap targets (respectively 0.076→0.063,
+0.082→0.063, 0.105→0.088, and 0.106→0.088). These values are displayed in
+Validation as `CAL. BRIER`; they are not replay inputs.
+
 To make it eligible for integration, it needs a better event definition,
 calibrated probability improvement versus the reference, and a causal method
 for scoring the no-pass/SAVE/DELAY alternatives without using future outcomes
 as inputs.
 
-### 6. Neural Network — optional sequence model
+### 7. Neural Network — optional sequence model
 
 **Status:** Later-stage research.
 
@@ -137,7 +166,7 @@ A neural network should only be introduced after the row-based models are stable
 
 It should not be added merely because it is more complex. It requires careful sequence construction, more compute, stronger leakage controls, and enough consistent telemetry across seasons.
 
-### 7. Support Vector Machine — low priority
+### 8. Support Vector Machine — low priority
 
 **Status:** Not currently planned for production.
 
@@ -145,7 +174,7 @@ An SVM could be used as an academic comparison, but it is a weak fit for the cur
 
 It should only be tested if the simpler benchmarks produce an unexpected result that needs investigation.
 
-### 8. Reinforcement Learning — future decision policy
+### 9. Reinforcement Learning — future decision policy
 
 **Status:** Deferred until the simulator is trustworthy.
 
@@ -183,19 +212,41 @@ Every candidate model should be compared with the same held-out races and at lea
 - **Gap-only:** `ATTACK` at gap ≤ 0.70 seconds, `DELAY` at gap ≤ 1.20 seconds, otherwise `SAVE`; this tests whether the model adds value beyond gap size alone.
 - **Majority-class baseline:** predicts whichever label is most common in the training period.
 
-The current UI exposes the Random Forest, Logistic Regression, Gradient
-Boosted Trees, always-SAVE, and gap-only comparisons in the held-out
-validation view. On the current v5 2026 holdout, Random Forest scores 58.25%
-accuracy / 45.37% macro F1, Logistic Regression scores 51.35% / 39.85%, and
-Gradient Boosted Trees scores 58.11% / 45.57%. Gradient Boosting has a
-slightly better balanced score and calibration, but slightly lower accuracy,
-so Random Forest remains the production candidate until downstream
-persistence selects a clear winner. Neither model beats the 69.79%
-always-SAVE baseline.
+The current UI exposes the Random Forest action policy, Logistic Regression,
+Gradient Boosted Trees, always-SAVE, and gap-only comparisons in the held-out
+validation view. On the current v6 2026 holdout, the Random Forest action
+policy scores 70.85% accuracy / 48.20% macro F1, Logistic Regression scores
+56.68% / 41.17%, and Gradient Boosted Trees scores 60.26% / 44.81%.
+Always-SAVE reaches 77.36% accuracy but only 29.08% macro F1 because it never
+identifies ATTACK or DELAY. The Random Forest is the current research
+candidate; no result is presented as a validated production race command.
 
 ## Evaluation order
 
 1. Freeze the decision-point labels and feature cutoff so no future information enters the input.
+
+   The current `decision-point.v6` audit additionally requires a clean future
+   outcome window: an immediate ATTACK label must hold for six laps, and a
+   DELAY label must become a durable pass within five laps. Rows contaminated
+   by pit cycles, flags/invalid timing, lapping interactions, or an incomplete
+   horizon are excluded rather than guessed. A model must only be retrained
+   after every participating cache file has this schema.
+
+   The first clean v6 retrain used 10,558 rows from 2018–2025 and 614 unseen
+   2026 rows. Random Forest reached 62.38% accuracy and 44.33% macro F1;
+   always-SAVE reached 77.36% accuracy because SAVE is overwhelmingly common.
+   This means the v6 result is a trustworthy benchmark, not a policy approval.
+   Its ATTACK F1 is 37% and DELAY F1 is 20%, so the next modelling work should
+   improve those minority actions rather than optimise headline accuracy.
+
+   A subsequent decision-policy layer selected ATTACK and DELAY evidence
+   weights using 5,909 expanding-fold historical validation rows only. It
+   selected `ATTACK × 0.65`, `DELAY × 0.80`, and `SAVE × 1.00`: non-SAVE
+   actions therefore require stronger model evidence before recommendation.
+   On the untouched 2026 holdout this improved macro F1 from 44.33% to 48.20%
+   and accuracy from 62.38% to 70.85%. It remains below the always-SAVE
+   accuracy baseline, so it is a balanced-decision improvement, not policy
+   deployment approval.
 2. Train Logistic Regression, Random Forest, and gradient-boosted trees on the same historical rows.
 3. Evaluate only on later, unseen races using a race-grouped temporal split.
 4. Compare accuracy, macro F1, per-class precision/recall, confusion matrices, and probability calibration.
@@ -207,7 +258,7 @@ always-SAVE baseline.
 
 ## Selection rule
 
-The production model will not be chosen by raw accuracy alone. A candidate must:
+The eventual deployment candidate will not be chosen by raw accuracy alone. A candidate must:
 
 - beat or meaningfully explain the baselines;
 - perform acceptably on macro F1 and minority-class recall;
@@ -238,3 +289,32 @@ an alternate real-race result.
 - Energy and some opponent-response values are modelled surrogates.
 - A retrospective replay evaluates a counterfactual under the configured model; it does not claim that the real race was altered.
 - More model types do not automatically make the result more accurate. Data quality, labels, leakage control, and simulator validity are more important than model count.
+
+## Zone replay and BOX model foundations
+
+The future simulation view has two deliberately separate evidence paths:
+
+- **Zone replay:** `extract_zone_opportunities.py` takes only a cited FIA
+  Detection Line / Activation Line record and interpolates public FastF1
+  car-data timing at the same track distance for every car. It emits actual
+  detection-line gaps and speeds. `build_zone_replays.py` may associate the
+  existing lap-start outcome label and modelled energy state with that record,
+  but labels this `OBSERVATIONAL_ASSOCIATION_ONLY`; it does not claim that a
+  zone action caused the pass or subsequent durability.
+- **BOX candidate model:** `extract_box_candidates.py` builds an independent
+  per-driver state immediately after a completed lap and labels only whether
+  that car entered the pits on the following lap. `train_box_model.py` uses a
+  2018–2025 / 2026 temporal split and a class-weighted logistic regression as
+  a transparent baseline. Its target is an observed pit-window pattern, not
+  an optimal tyre strategy, radio instruction, or live BOX command.
+
+The first BOX baseline contains 154,874 training rows and 11,387 unseen 2026
+rows. Its held-out AUC is 0.6941, but the event is rare (3.26% in the 2026
+holdout) and precision is only 6.12% at the neutral 0.50 threshold. That is
+not a usable automatic pit-call rate. The baseline is retained to establish a
+leakage-safe starting point and will require race-strategy features, calibrated
+thresholds, and counterfactual evaluation before it can influence a simulation.
+
+Neither path can satisfy the real-time gate on its own. A cited event-specific
+FIA appendix, exact zone identity, complete decision-state inputs, and a
+defensible causal evaluation remain required before any live-command claim.

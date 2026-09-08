@@ -130,13 +130,117 @@ The first alignment slice is now implemented in the working tree:
   better than a historical constant-rate reference. It is therefore displayed
   as a diagnostic validation result only, and is not used by the action model
   or tactical tree.
-- Candidate selection now has its own temporal window: 2018–2023 is the fit
-  period and 2024–2025 is the development period (20,125 / 10,306 rows across
-  48 development races). The final 2026 season is excluded from it. Random
-  Forest currently leads this development comparison on accuracy (56.07%) and
-  macro F1 (43.52%), but still does not beat the 73.80% always-SAVE accuracy
-  baseline. The result is therefore evidence against promoting a policy now,
-  rather than a basis for tuning on 2026.
+- Model family selection now uses four expanding historical folds rather than
+  one permanently withheld development period: 2018–2021 → 2022,
+  2018–2022 → 2023, 2018–2023 → 2024, and 2018–2024 → 2025. 2026 is excluded
+  from every fold. Gradient Boosting leads weighted macro F1 (43.67% versus
+  42.98% Random Forest) and wins that metric in all four folds, so it is the
+  current selection candidate. Neither candidate beats always-SAVE on raw
+  accuracy, so this is not evidence to deploy a policy or tune on 2026.
+- The Validation view now exposes held-out class counts plus per-action
+  precision, recall and F1. On the current 2026 holdout, `SAVE` accounts for
+  1,446 of 2,072 points while `ATTACK` accounts for 178 and `DELAY` 448. This
+  makes the always-SAVE accuracy advantage visible rather than letting it be
+  mistaken for useful tactical intelligence.
+- An `immediate-pass.v1` component now benchmarks the probability of a real
+  same-lap on-track pass using causal battle-state features. It has some
+  discrimination on the 2026 holdout (AUC 0.737), but its Brier error (0.181)
+  is materially worse than a constant historical pass-rate reference (0.093).
+  It remains descriptive only: observed passes encode the real driver's action
+  and environment, not a causal ATTACK-versus-SAVE outcome.
+- A `decision-point.v6` durable-label audit is now implemented and verified on
+  a cached race. It rejects training rows whose future label window crosses a
+  pit cycle, non-green/invalid timing, lapping interaction, or insufficient
+  remaining laps. `DELAY` now means a pass within five laps that also survives
+  the six-lap hold horizon, rather than merely any later position swap. An
+  offline label-audit report refuses to call the local cache training-ready
+  while old schema files remain. The complete v6 rebuild and subsequent
+  retraining are pending source-data access; the prior v5 model report is not
+  a v6 result.
+- The local cache-only v6 rebuild has now completed for all 184 available race
+  files (172 historical races and 12 completed 2026 races). The clean retrain
+  uses 10,558 historical rows and 614 held-out 2026 rows. Random Forest scores
+  62.38% accuracy / 44.33% macro F1, while always-SAVE reaches 77.36%
+  accuracy because SAVE remains the dominant outcome label. This is a cleaner
+  benchmark, not an improved deployable policy: ATTACK F1 is 37%, DELAY F1 is
+  20%, and further work must target minority-action precision and recall.
+- A transparent Random Forest action-policy layer is now selected from 5,909
+  historical out-of-fold rows only. The chosen ATTACK ×0.65 / DELAY ×0.80
+  weights suppress weak minority-action recommendations without altering model
+  probabilities. On the untouched 2026 holdout, this raises macro F1 from
+  44.33% to 48.20% and accuracy from 62.38% to 70.85%. It still does not beat
+  always-SAVE on raw accuracy, so it is a safer balanced-decision benchmark,
+  not a deployable race-command policy.
+- The tactical replay now returns a pit/tyre context contract for every tree:
+  both cars' observed starting compound/degradation proxy, plus every observed
+  pit-in/pit-out event inside the tactical horizon. These events are visibly
+  held fixed and gate ordinary pass claims; the tree does not hide a fictional
+  BOX branch or pretend it can infer counterfactual rejoin traffic, tyre
+  warm-up, undercut, or overcut outcomes yet.
+- The tactical replay now also runs a ±15% modelled deployment/harvest
+  calibration sensitivity check alongside the separate starting-SoC check.
+  Strategy makes it visible when the first recommendation stays stable across
+  conservative and favourable surrogate settings. These factors are explicitly
+  uncertainty stress cases, not FIA power/recharge limits or private telemetry.
+- The replay now declares its opponent policy as a deterministic conservative
+  best response: at each branch the opponent chooses the action that most
+  protects its position or maximises its immediate repass chance, retaining a
+  small reserve preference. It is explicitly an auditable model assumption,
+  not a claim about a driver's real radio instruction or hidden team strategy.
+- Every forward tree step now declares its state provenance. A same-lap,
+  role-aligned public matchup row is used where it exists; otherwise the
+  initial decision context is explicitly carried forward as modelled context.
+  This prevents the replay from silently inventing later telemetry while the
+  full shared-clock, track-distance state engine is still incomplete.
+- Each decision-point cache now records the complete official session
+  participant roster separately from its filtered battle rows. The race UI
+  uses this roster for selectors, so a driver who retired or whose battles are
+  excluded from training remains selectable and visible rather than silently
+  disappearing.
+- `audit_participant_rosters.py` verifies every cached race roster: it rejects
+  stale/missing/duplicate participant records, a mismatched declared count, or
+  any classified driver omitted from the selector roster.
+- The extraction contract now separates `analysisRows` (every retained
+  non-lapping close battle useful for inference/replay) from `rows` (only
+  outcome-label-eligible records allowed to train or score the classifier).
+  An uncertain future timing window is displayed as observed-but-unscorable;
+  it is never silently deleted from Strategy and never used as a target.
+- `audit_analysis_contract.py` enforces that only label-eligible rows can
+  enter training/holdout scoring, while observed-but-unscorable battles remain
+  accessible to strategy inference and replay.
+- The predictor now returns a per-inference completeness contract. Missing
+  important public state still permits a clearly marked partial inference for
+  an observed battle, but the UI exposes every neutral fallback instead of
+  silently treating it as a complete race state.
+- Every prediction now also includes a separate live-command gate. A 2026
+  score is marked `ANALYSIS_ONLY` unless an exact track-zone identity, a cited
+  FIA event Overtake Mode appendix, a complete two-car state, and a normal
+  green/pit-free context are available. This never changes the classifier
+  probability; it prevents a retrospective score or generic gap filter from
+  being presented as a legal live command.
+- The extractor, trainer, and predictor now share the source-controlled
+  `overtake-features.v1` contract. Cached race payloads and trained model
+  artifacts declare the same version; training rejects a stale cache and
+  prediction rejects a stale artifact instead of silently changing feature
+  meaning or order.
+- A strict local FIA event-appendix importer now validates each 2026
+  Competition Notes record before it can enter the Overtake Mode registry. It
+  requires the official FIA URL, publication date, document section, detection
+  gap/lines, Recharge limit, and power profile; a dry-run supports review
+  without modifying the registry. Exact event values remain unloaded until
+  they are transcribed and checked from the cited FIA document.
+- The held-out classification report now includes separate 2026-only slices by
+  attacking driver and circuit, alongside per-race results. These are
+  diagnostic evaluation outputs only; they never feed back into feature,
+  threshold, or model-family selection.
+- Every one of the 184 cached race payloads now includes observed
+  race-position accounting for every official participant: grid/start,
+  final classified position, net places, and every forward/backward
+  lap-classification movement with pit and track-status context. The Strategy
+  page exposes this evidence for the selected driver and the complete race
+  roster even when no close battle exists. `audit_driver_summaries.py` verifies
+  all 3,702 stored summaries; timing movement remains distinct from an
+  on-track overtake label.
 
 This is a foundation, not completion of the full specification. Exact
 on-track zone configuration, pit/tyre model, safety-car state, full two-car
@@ -362,7 +466,7 @@ now implemented in decision-point.v5:
   lap rather than a complete current lap.
 
 The v5 historical rebuild and the final 2026 holdout rebuild are complete. The
-current report is reproducible under the strict split, but the model is not
+current v5 report is reproducible under the strict split, but the model is not
 yet a winning policy: its 2026 accuracy is 58.25% versus 69.79% for
 always-SAVE. This is an evaluation finding, not a reason to hide or tune on
 the holdout; the next modelling work should improve the component models and
@@ -829,3 +933,124 @@ The defensible claim is narrower and stronger: PitWolf uses real historical
 race conditions, a documented two-car energy/overtake model, and unseen-race
 evaluation to estimate which tactical choice would have maximised position
 durability under stated assumptions.
+
+## 14. Observed race-position accounting
+
+For every recorded participant in every cached race, the canonical race payload
+also stores an observed position summary: grid/start position, final classified
+position, net places gained or lost, and every lap where the timing
+classification moved forward or backward. This is an evidence layer for the
+Strategy page, available even when no close battle is eligible for model
+training.
+
+A classification movement must not be called an overtake by default. It can be
+caused by a pit cycle, another car retiring, a safety-car/race-control process,
+or lap-one ordering. Each stored movement therefore includes lap, from/to
+position, places moved, pit context, track status, and `LAP_CLASSIFICATION` as
+its source. Only the separate outcome-labelling pipeline may identify a clean,
+durable on-track pass for training or scoring.
+
+## 15. Implementation status and remaining evidence gates
+
+The internal base-model implementation items in this document are now in place
+and are checked automatically:
+
+- the canonical cache is `decision-point.v6` with the shared
+  `overtake-features.v1` contract; all 184 cached races pass schema, label,
+  roster, and driver-summary audits;
+- observed close-battle records are separated from the 12,231 clean,
+  outcome-label-eligible training records, so ambiguous future outcomes never
+  enter training or held-out classification scoring;
+- training uses a race-grouped temporal boundary, with 2018–2025 for fitting
+  and completed 2026 races reserved for final reporting; expanding historical
+  folds select candidate model families without consulting the final holdout;
+- the shared two-car `energy-transition.v2` is used by the historical
+  surrogate and the backend tactical tree, including role reversal, opponent
+  response, capacity clipping, era metadata, pit non-recharge, and sensitivity
+  runs;
+- the backend tree is deterministic for a fixed request and only returns
+  ATTACK/SAVE/DELAY. Pit/tyre information is shown as observed context held
+  fixed rather than being silently invented as a fourth branch;
+- validation reports class balance, model comparisons, baselines, calibration,
+  race-bootstrap uncertainty, and 2026 slices by race, attacking driver, and
+  circuit. Immediate-pass and pass-durability models are explicitly displayed
+  as diagnostic observational components, not causal replay inputs;
+- every recorded participant remains selectable and receives observed
+  grid-to-finish and lap-classification movement evidence, including when they
+  had no model-training-eligible close battle.
+
+The following are deliberately **gated**, not treated as incomplete guesses:
+
+- exact FIA Competition Notes / event appendices for 2026 detection and
+  activation lines, event limits, and flag restrictions are required before a
+  record can be `LIVE_COMMAND_READY`. The local appendix importer validates
+  provenance and numeric values, but no values are invented in its absence;
+- FastF1 public data does not reveal private team SoC, deployment maps, or
+  driver radio strategy. Battery and response values therefore remain visibly
+  modelled surrogates;
+- an action-specific causal lap-time or pit/tyre effect model requires a
+  defensible counterfactual design or additional labelled data. The current
+  system keeps the honest observed-context boundary rather than calling an
+  association a causal effect;
+- the separate visual `RaceSimView` remains intentionally deferred. It must
+  be replaced only when it consumes the canonical backend replay state and
+  verified event-zone data; it must not be upgraded with new synthetic track
+  behaviour.
+
+This means the project is ready as a reproducible historical research and
+held-out evaluation baseline. It is not yet authorised to issue a real-time
+race command or to assert an alternative real-race finishing position.
+
+### 15.1 Zone-alignment implementation
+
+`backend/scripts/extract_zone_opportunities.py` is the separate, higher-
+fidelity evidence path for the future simulation screen. After cited FIA
+Detection and Activation Line evidence is added for an event, it interpolates
+each car's public FastF1 telemetry at the same official Detection Line,
+orders the cars at that point, and emits the real telemetry-derived gap for
+each eligible pair. The output is explicitly labelled
+`SAME_TRACK_DISTANCE_INTERPOLATED`.
+
+This does not silently rewrite the historical lap-start training dataset.
+Zone evidence currently permits retrospective alignment only; a full FIA
+power/recharge profile remains necessary before a live-command gate can open.
+
+### 15.2 Visual Straight Mode references
+
+The user-supplied 2026 circuit graphics for Australia, China, Japan, Canada,
+Monaco, Barcelona, Austria, Britain, Belgium, Hungary and the Netherlands are
+stored in `backend/data/straight-mode-visual-evidence.json`. They preserve the
+shown Straight Mode turn ranges and the illustrated Overtake marker references
+for a later track map. They are deliberately separate from the FIA registry:
+they are **turn-range references only**, have no certified metre coordinate,
+and cannot enable an FIA live-command gate. Monaco is recorded explicitly as
+having no Straight Mode zones. Miami remains absent from this visual-reference
+set because no map was supplied; its existing cited FIA line evidence remains
+separate.
+
+### 15.3 Zone replay and separate BOX foundation
+
+The cache-first zone replay path now interpolates every car at a cited FIA
+Detection Line using public FastF1 car-data distance integration. It records
+the same-track-distance gap and speed, plus an explicit `MEDIUM` confidence
+label for this public-data method. The higher-cost per-lap telemetry rebuild
+was removed so replay generation does not cause slow page loads.
+
+`build_zone_replays.py` joins a same-driver/same-defender/same-lap historical
+outcome only as `LAP_START_ROW_ASSOCIATED_NOT_ZONE_CAUSAL`. It also carries the
+existing modelled SoC fields as a surrogate, never as private battery
+telemetry. This creates a useful validation dataset without overstating what
+the source can prove.
+
+Pit/tyre work is kept in `extract_box_candidates.py` and
+`train_box_model.py`, completely outside the `ATTACK` / `SAVE` / `DELAY`
+classifier. Its label is observed next-lap pit entry after a completed-lap
+feature cutoff. It is a historical pit-window baseline, not an optimal BOX
+strategy or live team instruction.
+
+The initial backfill completed for all 184 cached race sessions (183,568
+candidate states). The first separate BOX logistic baseline uses only
+2018–2025 to train and holds out 2026. Its early AUC is 0.6941, but the rare
+pit-entry label has low 0.50-threshold precision (6.12%). It is therefore a
+validated data/model baseline only, explicitly not a pit instruction or
+simulation policy.

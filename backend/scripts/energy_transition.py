@@ -67,7 +67,8 @@ def clamp_soc(value: Any, capacity_mj: float = CAPACITY_MJ) -> float:
 
 
 def transition_soc(soc: float, action: str, row: dict[str, Any] | None = None,
-                   defending: bool = False, era: str = '2026') -> tuple[float, float, float]:
+                   defending: bool = False, era: str = '2026',
+                   deploy_scale: float = 1.0, harvest_scale: float = 1.0) -> tuple[float, float, float]:
     """Apply one tactical action and return (next_soc, deploy, harvest)."""
     config = get_era_config(era)
     profile = config['actionProfile'].get(action, config['actionProfile']['SAVE'])
@@ -78,8 +79,10 @@ def transition_soc(soc: float, action: str, row: dict[str, Any] | None = None,
     tyre_load += 0.08 * float(np.clip(_number(row.get(tyre_key)), 0.0, 1.0))
     pressure = min(0.16, abs(_number(row.get('closingRateS'))) / 4.0)
     pace = float(np.clip(_number(row.get('pace'), 0.5), 0.1, 0.9))
-    desired_deploy = profile['deploy'] + (pressure if defending else 0.0) + tyre_load + (0.10 * pace)
-    harvest = profile['harvest'] + (0.04 if not defending and action == 'SAVE' else 0.0) + (0.04 * (1.0 - pace))
+    desired_deploy = (profile['deploy'] + (pressure if defending else 0.0)
+                      + tyre_load + (0.10 * pace)) * max(0.0, _number(deploy_scale, 1.0))
+    harvest = ((profile['harvest'] + (0.04 if not defending and action == 'SAVE' else 0.0)
+               + (0.04 * (1.0 - pace))) * max(0.0, _number(harvest_scale, 1.0)))
     # A depleted car cannot spend a notional deployment budget it does not
     # have. Harvest may support a small same-lap amount, but the reported
     # deployment is clipped to the energy actually available.

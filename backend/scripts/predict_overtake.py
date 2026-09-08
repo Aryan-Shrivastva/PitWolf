@@ -24,11 +24,16 @@ import numpy as np
 
 from car_mass import car_mass_kg
 from fetch_f1_session import CACHE_DIR
+from overtake_feature_schema import COMPOUND_ORDINAL, FEATURE_SCHEMA_VERSION
 
 ROOT = pathlib.Path(CACHE_DIR).parent
 MODEL_PATH = ROOT / 'models' / 'overtake_rf.joblib'
 
-COMPOUND_ORDINAL = {'SOFT': 0, 'MEDIUM': 1, 'HARD': 2, 'INTERMEDIATE': 3, 'WET': 4}
+IMPORTANT_INPUTS = (
+    'gapS', 'closingRateS', 'speedDeltaKph', 'tyreAgeDiff', 'position',
+    'attackerSoCMj', 'defenderSoCMj', 'trafficAheadCount',
+    'trafficBehindCount', 'slipstreamProxy', 'dirtyAirRisk',
+)
 
 
 def _num(value, default=0.0):
@@ -42,6 +47,69 @@ def _num(value, default=0.0):
 def _weather(row, field, default=0.0):
     weather = row.get('weather')
     return _num(weather.get(field), default) if isinstance(weather, dict) else default
+
+
+def input_state(row):
+    """Report input completeness without refusing a useful observed battle.
+
+    The fitted pipeline has neutral defaults for incomplete public data. Those
+    defaults are retained for backwards-compatible inference, but the caller
+    must be able to distinguish a full decision-time state from a partial one.
+    """
+    missing = []
+    for field in IMPORTANT_INPUTS:
+        value = row.get(field)
+        if value is None or (isinstance(value, float) and not np.isfinite(value)):
+            missing.append(field)
+    return {
+        'status': 'COMPLETE' if not missing else 'PARTIAL',
+        'missingImportantInputs': missing,
+        'usesNeutralFallback': bool(missing),
+    }
+
+
+def live_command_gate(row, completeness):
+    """Keep retrospective classification distinct from a live FIA command.
+
+    The historical model can score a causal race-state record, but a 2026 live
+    Overtake Mode recommendation additionally needs an exact track-zone
+    identity and the cited event appendix. Neither may be inferred from the
+    generic close-battle filter. This gate does not change probabilities.
+    """
+    year = int(_num(row.get('year'), 0))
+    if year < 2026:
+        return {
+            'status': 'HISTORICAL_REPLAY_ONLY',
+            'liveCommandEligible': False,
+            'blockedBy': ['2026 Overtake Mode does not apply to this historical regulation era'],
+            'note': 'Valid for retrospective analysis only; not a current-regulation race command.',
+        }
+    rule_context = row.get('ruleContext') if isinstance(row.get('ruleContext'), dict) else {}
+    blocked = []
+    if not row.get('zoneId'):
+        blocked.append('exact track-zone identity is not loaded')
+    if not rule_context.get('eventSpecificDataLoaded'):
+        blocked.append('cited FIA event Overtake Mode appendix is not loaded')
+    if completeness.get('status') != 'COMPLETE':
+        blocked.append('complete two-car decision-state input is not available')
+    if bool(row.get('pitDistorted')):
+        blocked.append('pit-cycle context is active')
+    if row.get('attackerTrackStatus') not in (None, '1') or row.get('defenderTrackStatus') not in (None, '1'):
+        blocked.append('non-green race-control state is active')
+    return {
+        'status': 'LIVE_COMMAND_READY' if not blocked else 'ANALYSIS_ONLY',
+        'liveCommandEligible': not blocked,
+        'blockedBy': blocked,
+        'note': ('All configured live-command gates are satisfied.' if not blocked else
+                 'Prediction remains an analysis/replay estimate; it is not a live Overtake Mode command.'),
+    }
+
+
+def choose_action(probabilities, classes, action_policy):
+    """Apply the historically selected decision weights, if present."""
+    weights = (action_policy or {}).get('weights') or {}
+    factors = np.asarray([float(weights.get(label, 1.0)) for label in classes])
+    return classes[int(np.argmax(probabilities * factors))]
 
 
 def build_feature_vector(row, features):
@@ -82,7 +150,7 @@ def build_feature_vector(row, features):
     attacker_mass = car_mass_kg(year, row.get('driver'), frac)
     vector['attackerMassKg'] = attacker_mass
     vector['massDeltaKg'] = attacker_mass - car_mass_kg(year, row.get('defender'), frac)
-    return np.array([[vector[name] for name in features]], dtype=float)
+    return np.array([[vector[name] for name in features]], dtype=float), input_state(row)
 
 
 def main():
@@ -92,7 +160,16 @@ def main():
         print(json.dumps({'error': 'model not trained yet', 'modelPath': str(MODEL_PATH)}))
         return
 
+    if artifact.get('featureSchemaVersion') != FEATURE_SCHEMA_VERSION:
+        print(json.dumps({
+            'error': 'trained model feature schema is stale',
+            'expectedFeatureSchemaVersion': FEATURE_SCHEMA_VERSION,
+            'artifactFeatureSchemaVersion': artifact.get('featureSchemaVersion'),
+            'nextStep': 'retrain with train_overtake_model.py after cache schema audit',
+        }))
+        return
     model, features, classes = artifact['model'], artifact['features'], artifact['classes']
+    action_policy = artifact.get('actionPolicy')
 
     payload = json.loads(sys.stdin.read() or '{}')
     if isinstance(payload, list):
@@ -110,20 +187,23 @@ def main():
 
     predictions = []
     for row in rows:
-        x = build_feature_vector(row, features)
+        x, completeness = build_feature_vector(row, features)
         proba = model.predict_proba(x)[0]
         probs = {cls: round(float(p), 4) for cls, p in zip(classes, proba)}
-        label = classes[int(np.argmax(proba))]
+        label = choose_action(proba, classes, action_policy)
         year = int(_num(row.get('year'), 2025))
         frac = _num(row.get('lapFraction'), 0.5)
         a = car_mass_kg(year, row.get('driver'), frac)
         d = car_mass_kg(year, row.get('defender'), frac)
         predictions.append({'label': label, 'probabilities': probs,
+                            'inputState': completeness,
+                            'liveCommandGate': live_command_gate(row, completeness),
                             'mass': {'attackerKg': round(a, 1),
                                      'defenderKg': round(d, 1),
                                      'deltaKg': round(a - d, 1)}})
 
-    print(json.dumps({'modelType': 'RandomForestClassifier', 'classes': classes,
+    print(json.dumps({'modelType': 'RandomForestClassifier', 'featureSchemaVersion': FEATURE_SCHEMA_VERSION, 'classes': classes,
+                      'actionPolicy': action_policy,
                       'predictions': predictions, 'rows': len(predictions)}))
 
 

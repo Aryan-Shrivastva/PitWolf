@@ -146,6 +146,17 @@ export function StrategyDashboard({ onHome }) {
   const [drsOverride, setDrsOverride] = useState(null)
   const [raceSel, setRaceSel] = useState({ year: 2023, round: 21, session: 'R', driver: 'LEC' })
   const engine = useRaceEngine(raceSel, tab)
+  // Strategy/Energy/Overtake must describe the selected cached race, not the
+  // decorative home-screen scenario. A selected driver may have no close
+  // battle, so fall back to their own code rather than retaining a stale pair.
+  const selectedEventName = engine.decision.data?.eventName
+    ?? engine.events?.find((event) => Number(event.round) === Number(raceSel.round))?.name
+    ?? `ROUND ${raceSel.round}`
+  const selectedRows = engine.decision.data?.analysisRows ?? engine.decision.data?.rows ?? []
+  const selectedBattle = selectedRows.find((row) => row.driver === raceSel.driver) ?? null
+  const selectedContextLap = selectedBattle?.lap ?? '—'
+  const selectedContextDefender = selectedBattle?.defender ?? '—'
+  const selectedContextLaps = engine.decision.data?.totalLaps ?? '—'
 
   // When a season's extracted rounds arrive and exclude the current round
   // (e.g. switching to 2026, which has fewer completed races), snap to the
@@ -236,8 +247,8 @@ export function StrategyDashboard({ onHome }) {
         </div>
         <div className="ov-scenario-summary">
           <DataBadge tone="real">REAL RACE CONTEXT</DataBadge>
-          <strong>{attacker.code} <span>vs</span> {defender.code}</strong>
-          <p>Lap {meta.focus_lap} · {meta.lap_length_m.toLocaleString()} m · {meta.circuit}</p>
+          <strong>{raceSel.driver} <span>vs</span> {selectedContextDefender}</strong>
+          <p>{selectedEventName} · lap {selectedContextLap} of {selectedContextLaps}</p>
         </div>
       </div>
 
@@ -246,7 +257,13 @@ export function StrategyDashboard({ onHome }) {
       )}
 
       {tab === 'STRATEGY' && (
-        <StrategyTab sel={raceSel} decision={engine.decision} preds={engine.preds} energy={engine.energy} />
+        <StrategyTab
+          sel={raceSel}
+          decision={engine.decision}
+          preds={engine.preds}
+          energy={engine.energy}
+          onSelectDriver={(driver) => setRaceSel((current) => ({ ...current, driver }))}
+        />
       )}
 
       {tab === 'TRACK' && <>

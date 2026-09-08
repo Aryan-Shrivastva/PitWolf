@@ -27,8 +27,8 @@ except ImportError:  # allow package-style unit tests as well as direct scripts
                                     era_for_year, get_era_config, transition_soc)
 
 
-TREE_VERSION = "tactical-tree.v4"
-SCHEMA_VERSION = "replay-state.v4"
+TREE_VERSION = "tactical-tree.v7"
+SCHEMA_VERSION = "replay-state.v7"
 START_SOC_MJ = 2.8
 MAX_HORIZON = 6
 ACTIONS = ("ATTACK", "SAVE", "DELAY")
@@ -105,6 +105,66 @@ def context(row: dict[str, Any] | None) -> dict[str, float]:
     }
 
 
+def observed_pit_tyre_context(rows: list[dict[str, Any]], focus: dict[str, Any],
+                               selected: str, defender: str, start_lap: int,
+                               horizon: int) -> dict[str, Any]:
+    """Describe observed pit/tyre context without inventing a BOX simulation.
+
+    The tactical tree has exactly ATTACK/SAVE/DELAY branches. Public timing can
+    tell us that a real pit cycle occurred, but cannot identify the
+    counterfactual pit timing, rejoin traffic, or tyre warm-up of a different
+    strategy. Those events are therefore disclosed and held fixed, not scored
+    as a hidden fourth tactical choice.
+    """
+    end_lap = start_lap + max(0, horizon - 1)
+    events = []
+    seen = set()
+    for row in [focus, *rows]:
+        lap = int(number(row.get("lap"), -1))
+        if lap < start_lap or lap > end_lap:
+            continue
+        for driver, role in ((selected, "SELECTED"), (defender, "OPPONENT")):
+            if row.get("driver") == driver:
+                prefix = "attacker"
+            elif row.get("defender") == driver:
+                prefix = "defender"
+            else:
+                continue
+            pit_in = bool(row.get(f"{prefix}PitIn"))
+            pit_out = bool(row.get(f"{prefix}PitOut"))
+            if not pit_in and not pit_out:
+                continue
+            key = (driver, lap, pit_in, pit_out)
+            if key in seen:
+                continue
+            seen.add(key)
+            event = "PIT IN/OUT" if pit_in and pit_out else ("PIT IN" if pit_in else "PIT OUT")
+            events.append({"lap": lap, "driver": driver, "role": role, "event": event})
+
+    def tyre_state(prefix: str) -> dict[str, Any]:
+        return {
+            "compound": focus.get(f"{prefix}Compound"),
+            "ageDifferenceLaps": number(focus.get("tyreAgeDiff")) if prefix == "attacker" else -number(focus.get("tyreAgeDiff")),
+            "degradationProxy": round(probability(focus.get(f"{prefix}TyreDegProxy")), 3),
+        }
+
+    return {
+        "mode": "OBSERVED_CONTEXT_HELD_FIXED",
+        "boxActionSimulated": False,
+        "horizonLaps": horizon,
+        "observedPitEvents": sorted(events, key=lambda item: (item["lap"], item["driver"])),
+        "futurePitCycleWithinHorizon": bool(events),
+        "initialTyres": {
+            "selected": tyre_state("attacker"),
+            "opponent": tyre_state("defender"),
+        },
+        "handling": (
+            "Observed pit cycles gate normal overtake claims. Alternative BOX timing, rejoin traffic, "
+            "tyre warm-up and undercut/overcut outcomes are not simulated in this three-action tree."
+        ),
+    }
+
+
 def attack_chance(row: dict[str, Any] | None, action: str, our_soc: float,
                   opponent_soc: float, defending: bool) -> float:
     """Estimate the chance that the attacking side changes position this lap."""
@@ -167,11 +227,13 @@ def attack_chance(row: dict[str, Any] | None, action: str, our_soc: float,
 
 
 def best_response(row: dict[str, Any] | None, opponent_soc: float, our_soc: float,
-                  opponent_is_attacker: bool, era: str) -> tuple[str, float]:
+                  opponent_is_attacker: bool, era: str, deploy_scale: float = 1.0,
+                  harvest_scale: float = 1.0) -> tuple[str, float]:
     scores = {}
     for action in ACTIONS:
         next_soc, _, _ = transition_soc(
-            opponent_soc, action, row, not opponent_is_attacker, era=era)
+            opponent_soc, action, row, not opponent_is_attacker, era=era,
+            deploy_scale=deploy_scale, harvest_scale=harvest_scale)
         chance = attack_chance(row, action, next_soc, our_soc, not opponent_is_attacker)
         # An attacker values a pass; a defender values survival.
         score = chance if opponent_is_attacker else (1.0 - chance)
@@ -195,7 +257,8 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
     energy_config = get_era_config(regulation_era)
     initial_our_soc = soc_from_laps(energy_laps, selected, start_lap)
     initial_defender_soc = soc_from_laps(energy_laps, initial_defender, start_lap)
-    def simulate(our_start: float, defender_start: float) -> tuple[dict[str, Any], list[dict[str, Any]], int, int]:
+    def simulate(our_start: float, defender_start: float, deploy_scale: float = 1.0,
+                 harvest_scale: float = 1.0) -> tuple[dict[str, Any], list[dict[str, Any]], int, int]:
         """Evaluate one deterministic tree from an explicit pair of SoC states."""
         node_count = 0
         leaf_count = 0
@@ -218,20 +281,35 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
                 }
 
             lap = state["lap"]
-            forward = row_for(rows, lap, selected, initial_defender) or focus
+            forward = row_for(rows, lap, selected, initial_defender)
             reverse = row_for(rows, lap, initial_defender, selected) or {}
-            observed = reverse if state["ahead"] else forward
+            role_aligned = reverse if state["ahead"] else forward
+            if role_aligned:
+                observed = role_aligned
+                context_source = "OBSERVED_ROLE_ALIGNED"
+            elif forward:
+                # The observed pair still exists at this lap but the selected
+                # car's counterfactual role differs from the real ordering.
+                observed = forward
+                context_source = "OBSERVED_MATCHUP_ROLE_CARRIED"
+            else:
+                # Do not fabricate an unobserved future battle row.  Carry
+                # the decision-time state explicitly and disclose the limit.
+                observed = focus
+                context_source = "FOCUS_CONTEXT_CARRIED"
             children = []
             for action in ACTIONS:
                 our_soc, deploy, harvest = transition_soc(
-                    state["ourSoc"], action, observed, state["ahead"], era=regulation_era)
+                    state["ourSoc"], action, observed, state["ahead"], era=regulation_era,
+                    deploy_scale=deploy_scale, harvest_scale=harvest_scale)
                 opponent_action, response_score = best_response(
                     reverse if state["ahead"] else forward,
                     state["defenderSoc"], state["ourSoc"], state["ahead"], regulation_era,
+                    deploy_scale, harvest_scale,
                 )
                 opponent_soc, opponent_deploy, opponent_harvest = transition_soc(
                     state["defenderSoc"], opponent_action, observed, not state["ahead"],
-                    era=regulation_era,
+                    era=regulation_era, deploy_scale=deploy_scale, harvest_scale=harvest_scale,
                 )
                 if state["ahead"]:
                     repass = attack_chance(reverse or forward, opponent_action,
@@ -267,6 +345,7 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
                     "opponentDeployMj": opponent_deploy,
                     "opponentHarvestMj": opponent_harvest,
                     "opponentResponseScore": response_score,
+                    "contextSource": context_source,
                     "pitPlan": "OBSERVED PIT WINDOW; NO BATTERY RESET" if bool(observed.get("pitDistorted")) else "STAY OUT",
                     "leadLaps": round(lead_laps, 3),
                     "value": value,
@@ -300,7 +379,8 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             scenario_path.append({key: child[key] for key in (
                 "action", "probability", "ourSoc", "defenderSoc", "opponentAction",
                 "deployMj", "harvestMj", "opponentDeployMj", "opponentHarvestMj",
-                "pitPlan", "leadLaps", "aheadProbability")})
+                    "pitPlan", "leadLaps", "aheadProbability")})
+            scenario_path[-1]["contextSource"] = child.get("contextSource")
             scenario_path[-1]["lap"] = cursor["lap"]
             scenario_path[-1]["role"] = cursor["role"]
             cursor = child["next"]
@@ -335,6 +415,46 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             "note": "Sensitivity scenarios perturb modelled SoC only; they are not measurements of either car's battery.",
         }
 
+    # Starting SoC is only one uncertainty in the public-data surrogate.  Run
+    # a second, deliberately small stress test against the energy transition
+    # calibration itself.  The values are not regulatory limits and do not
+    # imply that a real car deployed or harvested at these rates.
+    calibration_sensitivity = None
+    if payload.get("includeSensitivity", True):
+        calibration_cases = (
+            ("CONSERVATIVE", "HIGH DEPLOY / LOW HARVEST", 1.15, 0.85),
+            ("BASE", "BASE CALIBRATION", 1.00, 1.00),
+            ("FAVOURABLE", "LOW DEPLOY / HIGH HARVEST", 0.85, 1.15),
+        )
+        calibration_results = []
+        for scenario_id, label, deploy_scale, harvest_scale in calibration_cases:
+            scenario_tree, scenario_path, _, _ = simulate(
+                initial_our_soc,
+                initial_defender_soc,
+                deploy_scale=deploy_scale,
+                harvest_scale=harvest_scale,
+            )
+            first_step = scenario_path[0] if scenario_path else {}
+            calibration_results.append({
+                "id": scenario_id,
+                "label": label,
+                "deployScale": deploy_scale,
+                "harvestScale": harvest_scale,
+                "recommendedAction": first_step.get("action", scenario_tree.get("bestAction")),
+                "expectedLeadLaps": round(number(scenario_path[-1].get("leadLaps") if scenario_path else 0.0), 3),
+            })
+        base_action = calibration_results[1]["recommendedAction"]
+        calibration_sensitivity = {
+            "variationPercent": 15,
+            "stableRecommendation": all(item["recommendedAction"] == base_action for item in calibration_results),
+            "baseAction": base_action,
+            "cases": calibration_results,
+            "note": (
+                "This is a ±15% surrogate-calibration stress test for modelled deployment and harvest. "
+                "It is not measured team telemetry, an FIA power limit, or an FIA recharge limit."
+            ),
+        }
+
     observed_lead_laps = int(number(focus.get("observedLeadLaps"), -1))
     if observed_lead_laps < 0:
         observed_lead_laps = int(number(focus.get("holdLaps"), 0)) if focus.get("held") else (1 if focus.get("passedNow") else 0)
@@ -345,6 +465,27 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
     actual_lead_laps = min(observed_lead_laps, horizon)
     expected = path[-1]["leadLaps"] if path else 0.0
     root_context = context(focus)
+    pit_tyre_context = observed_pit_tyre_context(
+        rows, focus, selected, initial_defender, start_lap, horizon)
+    context_source_counts: dict[str, int] = {}
+    for step in path:
+        source = str(step.get("contextSource") or "FOCUS_CONTEXT_CARRIED")
+        context_source_counts[source] = context_source_counts.get(source, 0) + 1
+    observed_context_laps = sum(
+        count for source, count in context_source_counts.items()
+        if source.startswith("OBSERVED_")
+    )
+    state_provenance = {
+        "horizonLaps": horizon,
+        "observedContextLaps": observed_context_laps,
+        "carriedContextLaps": context_source_counts.get("FOCUS_CONTEXT_CARRIED", 0),
+        "sourceCounts": context_source_counts,
+        "note": (
+            "Each tree step uses a same-lap observed matchup row when available. If a later "
+            "counterfactual role has no matching public row, the tree carries the initial "
+            "decision context forward and labels it as modelled rather than fabricating telemetry."
+        ),
+    }
     persistence_by_horizon = []
     for horizon_laps in (1, 2, 3, 5, 6):
         step = path[horizon_laps - 1] if len(path) >= horizon_laps else None
@@ -380,6 +521,17 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
         "success": bool(path) and expected > actual_lead_laps,
         "persistenceByHorizon": persistence_by_horizon,
         "socSensitivity": sensitivity_summary,
+        "energyCalibrationSensitivity": calibration_sensitivity,
+        "opponentPolicy": {
+            "id": "CONSERVATIVE_BEST_RESPONSE_HEURISTIC_V1",
+            "type": "DETERMINISTIC_CONSERVATIVE_BEST_RESPONSE",
+            "description": (
+                "At every branch, the opponent selects ATTACK, SAVE, or DELAY that maximises its "
+                "immediate pass chance when behind, or its survival chance when ahead, with a small "
+                "remaining-SoC preference. This is a model assumption, not the real driver's radio command."
+            ),
+        },
+        "stateProvenance": state_provenance,
         "decisionContext": {
             "raceControl": "CLEAR" if root_context["track_clear"] else "GATED",
             "pitDistorted": root_context["pit_distorted"],
@@ -388,6 +540,7 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             "overtakeActionsEnabled": root_context["track_clear"] and not root_context["pit_distorted"],
             "ruleContext": {**rule_context, "application": rule_application},
         },
+        "pitTyreContext": pit_tyre_context,
         "selected": selected,
         "defender": initial_defender,
         "energyModelVersion": ENERGY_MODEL_VERSION,
@@ -403,10 +556,13 @@ def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
             "The selected driver branches into ATTACK, SAVE and DELAY at every lap.",
             "The opponent selects a best response from the same three actions using its remaining SoC.",
             "A pass reverses attacking and defending roles; pit stops change tyre/time context only and never recharge the battery.",
+            "Observed pit cycles and tyre state are held fixed as context; this three-action tree does not simulate an alternative BOX strategy.",
             "The tactical horizon is capped at six laps to avoid an unbounded 3^N tree.",
             "Non-green race-control states and pit-distorted exchanges are gated as non-overtake windows.",
             "Success compares estimated persistence with observed consecutive laps ahead, not finish position alone.",
             "The SoC sensitivity panel varies modelled starting energy by 0.50 MJ; it is a robustness check, not private battery telemetry.",
+            "The energy-calibration sensitivity panel varies surrogate deployment and harvest by 15%; it is not an FIA limit or measured team energy data.",
+            "Later tree laps disclose whether their battle context is observed at that lap or carried from the initial observed decision state.",
         ],
     }
 

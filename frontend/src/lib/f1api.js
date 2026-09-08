@@ -30,7 +30,10 @@ export function fetchDecisionPoints(year, round, session) {
 const memoryCache = new Map()
 // Bump this when a model/schema artifact changes so an old report cannot be
 // displayed from the browser after retraining.
-const CACHE_PREFIX = 'pitwolf:api:v13:'
+// v33 separates the current analysis-row scoring response from older browser
+// sessions that stored an incomplete prediction payload.  Those old payloads
+// made the Strategy page mistake a model-score failure for "no battle".
+const CACHE_PREFIX = 'pitwolf:api:v33:'
 
 function storageGet(key) {
   try {
@@ -75,10 +78,11 @@ function fetchCached(url, ttl) {
   return promise
 }
 
-export async function predictOvertake(rows) {
+export async function predictOvertake(rows, ruleContext = null) {
   const first = rows?.[0] ?? {}
   const last = rows?.[rows.length - 1] ?? {}
-  const cacheKey = `predict:${first.year}:${first.round}:${first.session}:${rows?.length ?? 0}:${first.lap}:${last.lap}`
+  const ruleKey = ruleContext?.eventKey ?? ruleContext?.status ?? 'no-rule-context'
+  const cacheKey = `predict:${first.year}:${first.round}:${first.session}:${rows?.length ?? 0}:${first.lap}:${last.lap}:${ruleKey}`
   const cached = storageGet(cacheKey)
   if (cached !== null) return cached
   const memory = memoryCache.get(cacheKey)
@@ -87,7 +91,10 @@ export async function predictOvertake(rows) {
   const promise = fetch('/api/f1/overtake/predict', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rows }),
+    // Rule context is not an ML feature. It travels with every record solely
+    // so the backend can disclose whether a score is eligible to become a
+    // live 2026 Overtake Mode command.
+    body: JSON.stringify({ rows: rows.map((row) => ({ ...row, ruleContext })) }),
   }).then(async (response) => {
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
