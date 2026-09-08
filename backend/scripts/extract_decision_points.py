@@ -7,7 +7,7 @@ car ahead at a lap crossing, then labels the outcome-optimal decision:
 - ATTACK: the pass happened on the next lap and held for `--hold-laps`
   (user-confirmed durability cutoff ~5-6 laps; a pass that was given back
   inside the window is NOT outcome-optimal and lands in SAVE);
-- DELAY:  no immediate pass but a durable pass within the next 5 laps;
+- DELAY:  no immediate pass but a durable pass beginning within the next 5 laps;
 - SAVE:   no durable pass at all.
 
 Features per row: gap, closing rate, straight-line speed delta (max speed of
@@ -31,9 +31,11 @@ import pandas as pd
 
 from energy_surrogate import add_surrogate_energy
 from fetch_f1_session import CACHE_DIR
+from overtake_feature_schema import FEATURE_SCHEMA_VERSION
 
 OUT_ROOT = pathlib.Path(CACHE_DIR).parent / 'decision-points'
-SCHEMA_VERSION = 'decision-point.v5'
+SCHEMA_VERSION = 'decision-point.v6'
+DEFAULT_DELAY_WINDOW_LAPS = 5
 
 COMPOUND_ORDINAL = {
     'SOFT': 0, 'MEDIUM': 1, 'HARD': 2, 'INTERMEDIATE': 3, 'WET': 4,
@@ -144,8 +146,53 @@ def driver_row_at_position_time(timelines, position, timestamp_s, tolerance_s=5.
     return (best[1], best[2]) if best else (None, None)
 
 
-def label_outcome(timelines, driver, defender, lap, hold_laps, max_lap):
-    """Returns (label, passed_now, held, exclusion_reason)."""
+def outcome_interval_reason(timelines, driver, defender, start_lap, end_lap):
+    """Return why a retrospective outcome interval is not auditable.
+
+    Later laps are allowed for a label, but a pass/hold result that crosses a
+    pit cycle, non-green period, lapping interaction, deleted lap, or missing
+    timing cannot truthfully represent an ordinary on-track tactical outcome.
+    """
+    for current_lap in range(start_lap, end_lap + 1):
+        attacker_row = (timelines.get(driver, {}).get(current_lap) or {})
+        defender_row = (timelines.get(defender, {}).get(current_lap) or {})
+        if not attacker_row or not defender_row or attacker_row.get('pos') is None or defender_row.get('pos') is None:
+            return 'MISSING_OUTCOME_POSITION'
+        if attacker_row.get('pit') or defender_row.get('pit'):
+            return 'OUTCOME_PIT_CYCLE'
+        if attacker_row.get('trackStatus') not in (None, '1') or defender_row.get('trackStatus') not in (None, '1'):
+            return 'OUTCOME_NON_GREEN_TRACK_STATUS'
+        if attacker_row.get('deleted') or defender_row.get('deleted'):
+            return 'OUTCOME_DELETED_LAP'
+        if attacker_row.get('isAccurate') is False or defender_row.get('isAccurate') is False:
+            return 'OUTCOME_INACCURATE_LAP'
+        attacker_lap = attacker_row.get('lapNumber')
+        defender_lap = defender_row.get('lapNumber')
+        if attacker_lap is None or defender_lap is None or attacker_lap != defender_lap:
+            return 'OUTCOME_LAPPING_INTERACTION'
+    return None
+
+
+def held_for_horizon(timelines, driver, defender, start_lap, hold_laps, max_lap):
+    """Return (held, reason, held_laps) for a position gain at ``start_lap``."""
+    end_lap = start_lap + hold_laps - 1
+    if end_lap > max_lap:
+        return None, 'INSUFFICIENT_RACE_REMAINING_FOR_HOLD', 0
+    reason = outcome_interval_reason(timelines, driver, defender, start_lap, end_lap)
+    if reason:
+        return None, reason, 0
+    held_laps = 0
+    for current_lap in range(start_lap, end_lap + 1):
+        attacker = timelines[driver][current_lap]
+        defender_row = timelines[defender][current_lap]
+        if attacker['pos'] >= defender_row['pos']:
+            return False, None, held_laps
+        held_laps += 1
+    return True, None, held_laps
+
+
+def label_outcome(timelines, driver, defender, lap, hold_laps, delay_window_laps, max_lap):
+    """Return an auditable durable action label and its outcome evidence."""
     def pos_of(d, k):
         row = timelines.get(d, {}).get(k)
         return row['pos'] if row else None
@@ -153,27 +200,62 @@ def label_outcome(timelines, driver, defender, lap, hold_laps, max_lap):
     d_next = pos_of(driver, lap + 1)
     a_next = pos_of(defender, lap + 1)
     if d_next is None:
-        return None, False, False, 'MISSING_FUTURE_POSITION'
+        return None, False, False, 'MISSING_FUTURE_POSITION', None
     passed_now = a_next is not None and d_next < a_next
 
     if passed_now:
-        held = True
-        for k in range(lap + 1, min(lap + hold_laps, max_lap) + 1):
-            dk, ak = pos_of(driver, k), pos_of(defender, k)
-            if dk is None or ak is None:
-                return None, True, False, 'MISSING_FUTURE_POSITION'
-            if not dk < ak:
-                held = False
-                break
-        return ('ATTACK' if held else 'SAVE'), True, held, None
+        held, reason, held_laps = held_for_horizon(
+            timelines, driver, defender, lap + 1, hold_laps, max_lap)
+        if held is None:
+            return None, True, False, reason, None
+        if held:
+            return 'ATTACK', True, True, None, {
+                'labelPassLap': lap + 1,
+                'labelHeldLaps': held_laps,
+                'labelEvidence': 'IMMEDIATE_DURABLE_PASS',
+                'outcomeHorizonEndLap': lap + hold_laps,
+            }
+        return 'SAVE', True, False, None, {
+            'labelPassLap': lap + 1,
+            'labelHeldLaps': held_laps,
+            'labelEvidence': 'IMMEDIATE_PASS_NOT_DURABLE',
+            'outcomeHorizonEndLap': lap + hold_laps,
+        }
 
-    for k in range(lap + 2, min(lap + hold_laps, max_lap) + 1):
-        dk, ak = pos_of(driver, k), pos_of(defender, k)
+    latest_delayed_pass = min(lap + delay_window_laps, max_lap)
+    for pass_lap in range(lap + 2, latest_delayed_pass + 1):
+        dk, ak = pos_of(driver, pass_lap), pos_of(defender, pass_lap)
         if dk is None or ak is None:
-            return None, False, False, 'MISSING_FUTURE_POSITION'
+            return None, False, False, 'MISSING_FUTURE_POSITION', None
         if dk < ak:
-            return 'DELAY', False, False, None
-    return 'SAVE', False, False, None
+            held, reason, held_laps = held_for_horizon(
+                timelines, driver, defender, pass_lap, hold_laps, max_lap)
+            if held is None:
+                return None, False, False, reason, None
+            if held:
+                prior_reason = outcome_interval_reason(
+                    timelines, driver, defender, lap + 1, pass_lap - 1)
+                if prior_reason:
+                    return None, False, False, prior_reason, None
+                return 'DELAY', False, False, None, {
+                    'labelPassLap': pass_lap,
+                    'labelHeldLaps': held_laps,
+                    'labelEvidence': 'DELAYED_DURABLE_PASS',
+                    'outcomeHorizonEndLap': pass_lap + hold_laps - 1,
+                }
+
+    save_horizon_end = min(lap + delay_window_laps + hold_laps - 1, max_lap)
+    if save_horizon_end < lap + delay_window_laps + hold_laps - 1:
+        return None, False, False, 'INSUFFICIENT_RACE_REMAINING_FOR_DELAY_WINDOW', None
+    reason = outcome_interval_reason(timelines, driver, defender, lap + 1, save_horizon_end)
+    if reason:
+        return None, False, False, reason, None
+    return 'SAVE', False, False, None, {
+        'labelPassLap': None,
+        'labelHeldLaps': 0,
+        'labelEvidence': 'NO_DURABLE_PASS_IN_DELAY_WINDOW',
+        'outcomeHorizonEndLap': save_horizon_end,
+    }
 
 
 def observed_persistence(timelines, driver, defender, lap, max_lap):
@@ -198,6 +280,64 @@ def observed_persistence(timelines, driver, defender, lap, max_lap):
             break
         held_laps += 1
     return pass_lap, held_laps
+
+
+def driver_race_summaries(participants, timelines, grid_positions, finish_positions,
+                          result_status):
+    """Return observed race-position summaries for every recorded entrant.
+
+    Position gains are timing-classification changes, not automatically
+    labelled as overtakes: pit cycles, retirements, safety-car procedures and
+    lap-one order changes can all move a driver forward. Those contexts remain
+    attached to each event so the Strategy layer never overclaims them.
+    """
+    summaries = []
+    for driver in sorted(set(participants)):
+        timeline = timelines.get(driver, {})
+        laps = sorted(timeline)
+        first = timeline.get(laps[0]) if laps else None
+        last = timeline.get(laps[-1]) if laps else None
+        grid = grid_positions.get(driver)
+        grid = grid if grid is not None and grid > 0 else None
+        first_position = first.get('pos') if first else None
+        final_position = finish_positions.get(driver)
+        previous_position = grid
+        gain_events = []
+        loss_events = []
+        for lap in laps:
+            state = timeline[lap]
+            position = state.get('pos')
+            if position is None:
+                continue
+            if previous_position is not None and position != previous_position:
+                event = {
+                    'lap': lap,
+                    'fromPosition': previous_position,
+                    'toPosition': position,
+                    'places': abs(previous_position - position),
+                    'pitContext': bool(state.get('pit') or (timeline.get(lap - 1) or {}).get('pit')),
+                    'trackStatus': state.get('trackStatus'),
+                    'source': 'LAP_CLASSIFICATION',
+                }
+                if position < previous_position:
+                    gain_events.append(event)
+                else:
+                    loss_events.append(event)
+            previous_position = position
+        summaries.append({
+            'driver': driver,
+            'gridPosition': grid,
+            'firstClassifiedPosition': first_position,
+            'finalPosition': final_position,
+            'lastObservedPosition': last.get('pos') if last else None,
+            'status': result_status.get(driver),
+            'netPlacesGained': grid - final_position if grid is not None and final_position is not None else None,
+            'positionGainEvents': gain_events,
+            'positionLossEvents': loss_events,
+            'positionGainCount': sum(event['places'] for event in gain_events),
+            'positionLossCount': sum(event['places'] for event in loss_events),
+        })
+    return summaries
 
 
 def nearest_weather(weather_data, session_seconds):
@@ -261,7 +401,8 @@ def tyre_degradation_proxy(timeline, lap):
     return bounded((age / 45.0) + (drift / 5.0))
 
 
-def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6):
+def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6,
+                 delay_window_laps=DEFAULT_DELAY_WINDOW_LAPS):
     event = fastf1.get_event(year, round_number)
     session = event.get_session(session_name)
     try:
@@ -278,8 +419,15 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
     finish_positions = {}
     grid_positions = {}
     result_status = {}
+    # The participant roster is deliberately independent from retained battle
+    # rows. A driver may finish/retire without a model-training-eligible
+    # decision point, but must remain selectable in the race UI.
+    participants = []
     for _, result in session.results.iterrows():
         abbreviation = result.get('Abbreviation')
+        if abbreviation is not None:
+            abbreviation = str(abbreviation)
+            participants.append(abbreviation)
         position = num(result.get('Position'))
         if abbreviation is not None and position is not None:
             finish_positions[str(abbreviation)] = int(position)
@@ -304,7 +452,13 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
         if speed_lap == 1 and speed is not None
     ]
 
+    # ``rows`` remains the clean, outcome-label-eligible training/evaluation
+    # dataset. ``analysis_rows`` retains every real close-battle observation,
+    # including a battle whose future label window is ambiguous. The latter is
+    # essential for driver-facing replay/inference but must never leak into
+    # model fitting or holdout scoring.
     rows = []
+    analysis_rows = []
     excluded_rows = []
     for lap in range(2, int(total_laps) + 1):
         # Decision features are available at the start of this lap.  The
@@ -326,7 +480,7 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
             attacker_lap_number = int(row['lapNumber'])
             defender_lap_number = int(d_row['lapNumber'])
             lap_difference = attacker_lap_number - defender_lap_number
-            if lap_difference > 0:
+            if lap_difference != 0:
                 excluded_rows.append({
                     'year': year,
                     'round': round_number,
@@ -337,26 +491,15 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
                     'attackerLapNumber': attacker_lap_number,
                     'defenderLapNumber': defender_lap_number,
                     'lapDifference': lap_difference,
-                    'eventType': 'LAPPING',
+                    'eventType': 'LAPPING' if lap_difference > 0 else 'LAPPED_BY_DEFENDER',
                     'gapS': round(gap, 3),
-                    'exclusionReasons': ['LAPPING_BACKMARKER'],
+                    'exclusionReasons': ['LAPPING_BACKMARKER' if lap_difference > 0 else 'LAPPED_BY_DEFENDER'],
                 })
                 continue
 
-            label, passed_now, held, label_reason = label_outcome(
-                timelines, driver, defender, lap, hold_laps, int(total_laps))
-            if label is None:
-                excluded_rows.append({
-                    'year': year,
-                    'round': round_number,
-                    'session': session_name,
-                    'lap': lap,
-                    'driver': driver,
-                    'defender': defender,
-                    'gapS': round(gap, 3),
-                    'exclusionReasons': [label_reason or 'AMBIGUOUS_OUTCOME'],
-                })
-                continue
+            label, passed_now, held, label_reason, label_evidence = label_outcome(
+                timelines, driver, defender, lap, hold_laps, delay_window_laps, int(total_laps))
+            outcome_exclusion_reason = label_reason or 'AMBIGUOUS_OUTCOME' if label is None else None
 
             prev_gap = gap_at(timelines, driver, defender, lap - 1)
             pit_lap = row['pit'] or d_row.get('pit', False)
@@ -393,7 +536,7 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
                (timelines.get(defender, {}).get(lap + 1) or {}).get('pos') is None:
                 exclusion_reasons.append('MISSING_FUTURE_POSITION')
 
-            rows.append({
+            record = {
                 'year': year,
                 'round': round_number,
                 'session': session_name,
@@ -449,13 +592,16 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
                 'raceMeanSpeedKph': round(causal_mean_speed, 1) if causal_mean_speed else None,
                 'featureCutoff': 'LAP_START',
                 'labelSource': 'OUTCOME_DERIVED',
+                'labelPolicyVersion': 'DURABLE_PASS_AUDIT_V1',
                 'pitDistorted': pit_lap or pit_next,
                 'defenderActive': (timelines.get(defender, {}).get(lap + 1) or {}).get('pos') is not None,
                 'observedPassLap': observed_pass_lap,
                 'observedLeadLaps': observed_lead_laps,
                 'weather': nearest_weather(session.weather_data, row['startS']),
                 'exclusionReasons': exclusion_reasons,
-                'eligibleForTraining': not exclusion_reasons,
+                'outcomeLabelEligible': label is not None,
+                'outcomeExclusionReasons': [outcome_exclusion_reason] if outcome_exclusion_reason else [],
+                'eligibleForTraining': label is not None and not exclusion_reasons,
                 'missingFields': missing_fields({
                     'decisionTimestampS': row['startS'],
                     'gapS': gap,
@@ -467,7 +613,22 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
                 'passedNow': passed_now,
                 'held': held,
                 'label': label,
-            })
+                **(label_evidence or {}),
+            }
+            analysis_rows.append(record)
+            if label is None:
+                excluded_rows.append({
+                    'year': year,
+                    'round': round_number,
+                    'session': session_name,
+                    'lap': lap,
+                    'driver': driver,
+                    'defender': defender,
+                    'gapS': round(gap, 3),
+                    'exclusionReasons': [outcome_exclusion_reason],
+                })
+            else:
+                rows.append(record)
         past_speed_values.extend(
             speed for (speed_driver, speed_lap), speed in speeds.items()
             if speed_lap == lap and speed is not None
@@ -479,9 +640,28 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
         # which would leak non-standard NaN values into the JSON cache.
         rows = row_frame.astype(object).where(pd.notna(row_frame), None).to_dict(orient='records')
 
+        # Keep the identical modelled SoC values on the corresponding clean
+        # analysis records. Ambiguous observed battles intentionally have no
+        # fabricated historical SoC feature; live/replay state obtains energy
+        # from the shared race trace instead.
+        enriched = {
+            (item['lap'], item['driver'], item['defender']): item
+            for item in rows
+        }
+        for item in analysis_rows:
+            clean = enriched.get((item['lap'], item['driver'], item['defender']))
+            if clean:
+                item.update({
+                    'attackerSoCMj': clean.get('attackerSoCMj'),
+                    'defenderSoCMj': clean.get('defenderSoCMj'),
+                    'energyDeltaMj': clean.get('energyDeltaMj'),
+                })
+
     counts = {}
     for r in rows:
         counts[r['label']] = counts.get(r['label'], 0) + 1
+    driver_summaries = driver_race_summaries(
+        participants, timelines, grid_positions, finish_positions, result_status)
 
     return {
         'year': year,
@@ -491,9 +671,18 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
         'totalLaps': int(total_laps),
         'maxGapThresholdS': max_gap,
         'holdLaps': hold_laps,
+        'delayWindowLaps': delay_window_laps,
         'finishPositions': finish_positions,
+        'participants': sorted(set(participants)),
+        'participantCount': len(set(participants)),
+        'driverSummaries': driver_summaries,
         'raceMeanSpeedKphFinalObserved': round(race_mean_speed, 1) if race_mean_speed else None,
         'labelCounts': counts,
+        'analysisCounts': {
+            'observedBattles': len(analysis_rows),
+            'outcomeLabelEligible': len(rows),
+            'outcomeUnscorable': len(analysis_rows) - len(rows),
+        },
         'excludedRows': excluded_rows,
         'excludedCount': len(excluded_rows),
         'lappingExcludedCount': sum(
@@ -501,6 +690,7 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
             if 'LAPPING_BACKMARKER' in row.get('exclusionReasons', [])
         ),
         'schemaVersion': SCHEMA_VERSION,
+        'featureSchemaVersion': FEATURE_SCHEMA_VERSION,
         'featureCutoff': 'LAP_START',
         'provenance': {
             'real': ['position', 'gridPosition', 'lapNumber', 'lapTimeS', 'compound', 'tyreLife', 'pit', 'trackStatus', 'weather'],
@@ -511,6 +701,7 @@ def extract_race(year, round_number, session_name='R', max_gap=1.2, hold_laps=6)
             'modelled': ['attackerSoCMj', 'defenderSoCMj', 'energyDeltaMj'],
         },
         'rows': rows,
+        'analysisRows': analysis_rows,
     }
 
 
@@ -521,6 +712,9 @@ def main():
     parser.add_argument('--session', default='R')
     parser.add_argument('--max-gap', type=float, default=1.2)
     parser.add_argument('--hold-laps', type=int, default=6)
+    parser.add_argument('--delay-window-laps', type=int, default=DEFAULT_DELAY_WINDOW_LAPS)
+    parser.add_argument('--offline', action='store_true',
+                        help='use only existing FastF1 HTTP cache entries; never request the network')
     args = parser.parse_args()
 
     out = OUT_ROOT / str(args.year) / f'{args.round}_{args.session.lower()}.json'
@@ -529,13 +723,21 @@ def main():
             cached = json.loads(out.read_text(encoding='utf-8'))
         except (OSError, json.JSONDecodeError):
             cached = None
-        if isinstance(cached, dict) and cached.get('schemaVersion') == SCHEMA_VERSION:
+        if (isinstance(cached, dict) and cached.get('schemaVersion') == SCHEMA_VERSION
+                and cached.get('featureSchemaVersion') == FEATURE_SCHEMA_VERSION
+                and isinstance(cached.get('participants'), list)
+                and isinstance(cached.get('analysisRows'), list)
+                and isinstance(cached.get('driverSummaries'), list)):
             print(json.dumps(cached, allow_nan=False))
             return
 
     fastf1.set_log_level('ERROR')
     fastf1.Cache.enable_cache(str(CACHE_DIR))
-    payload = extract_race(args.year, args.round, args.session, args.max_gap, args.hold_laps)
+    if args.offline:
+        fastf1.Cache.offline_mode(True)
+    payload = extract_race(
+        args.year, args.round, args.session, args.max_gap, args.hold_laps,
+        args.delay_window_laps)
     out.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, allow_nan=False)
     out.write_text(text, encoding='utf-8')

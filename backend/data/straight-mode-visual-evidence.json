@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "straight-mode-visual-evidence.v1",
+  "purpose": "Turn-range references for a future track-map overlay and track-distance mapping workflow. They do not supply FIA command parameters.",
+  "provenance": {
+    "kind": "USER_SUPPLIED_IMAGE_AND_DESCRIPTION",
+    "received": "2026-09-08",
+    "legalStatus": "NOT_FIA_EVENT_APPENDIX",
+    "rule": "This registry must not set eventSpecificDataLoaded, liveCommandEligible, an Overtake detection gap, or a track-distance coordinate."
+  },
+  "events": {
+    "2026:1:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 1,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T2", "to": "T3" },
+        { "zoneId": "SM-3", "from": "T5", "to": "T6" },
+        { "zoneId": "SM-4", "from": "T8", "to": "T9" },
+        { "zoneId": "SM-5", "from": "T10", "to": "T11" }
+      ],
+      "overtakeMarkerReference": { "detection": "after T13", "activation": "entry T14", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:2:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 2,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T4", "to": "T6" },
+        { "zoneId": "SM-3", "from": "T10", "to": "T11" },
+        { "zoneId": "SM-4", "from": "T11", "to": "T14", "description": "Long straight into T14" }
+      ],
+      "overtakeMarkerReference": { "detection": "T16", "activation": "start/finish straight", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:3:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 3,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T14", "to": "T15" }
+      ],
+      "overtakeMarkerReference": { "detection": "T17", "activation": "start/finish straight", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:5:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 4,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T7", "to": "T8" },
+        { "zoneId": "SM-3", "from": "T9", "to": "T10" },
+        { "zoneId": "SM-4", "from": "T11", "to": "T13" }
+      ],
+      "overtakeMarkerReference": { "detection": "before T13", "activation": "exit T14", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:6:r": {
+      "status": "STRAIGHT_MODE_DISABLED_REFERENCE",
+      "enabled": false,
+      "coordinateStatus": "NO_STRAIGHT_MODE_ZONES",
+      "imageOrder": 5,
+      "zones": [],
+      "overtakeMarkerReference": { "detection": "between T16 and T17", "activation": "between T18 and T19", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:7:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 6,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T3", "to": "T4" },
+        { "zoneId": "SM-3", "from": "T5", "to": "T7" },
+        { "zoneId": "SM-4", "from": "T9", "to": "T10" }
+      ],
+      "overtakeMarkerReference": { "detection": "T13", "activation": "before T14", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:8:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 7,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T1", "to": "T3" },
+        { "zoneId": "SM-3", "from": "T3", "to": "T4" },
+        { "zoneId": "SM-4", "from": "T8", "to": "T9" }
+      ],
+      "overtakeMarkerReference": { "detection": "before T10", "activation": "exit T10", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:9:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 8,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T5", "to": "T6" },
+        { "zoneId": "SM-3", "from": "T7", "to": "T9" },
+        { "zoneId": "SM-4", "from": "T14", "to": "T15", "description": "Hangar Straight" }
+      ],
+      "overtakeMarkerReference": { "detection": "after T17", "activation": "before T18", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:10:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 9,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Short start/finish run" },
+        { "zoneId": "SM-2", "from": "T2", "to": "T3" },
+        { "zoneId": "SM-3", "from": "T4", "to": "T5", "description": "Kemmel Straight" },
+        { "zoneId": "SM-4", "from": "T15", "to": "T16" },
+        { "zoneId": "SM-5", "from": "T17", "to": "T18" }
+      ],
+      "overtakeMarkerReference": { "detection": "T19", "activation": "exit T19", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:11:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 10,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T1", "to": "T2" },
+        { "zoneId": "SM-3", "from": "T3", "to": "T4" },
+        { "zoneId": "SM-4", "from": "T11", "to": "T12" }
+      ],
+      "overtakeMarkerReference": { "detection": "T14", "activation": "exit T14", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:12:r": {
+      "status": "TURN_RANGE_REFERENCE",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "imageOrder": 11,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
+        { "zoneId": "SM-2", "from": "T10", "to": "T11" }
+      ],
+      "overtakeMarkerReference": { "detection": "before T13", "activation": "between T13 and T14", "status": "VISUAL_REFERENCE_ONLY" }
+    }
+  }
+}

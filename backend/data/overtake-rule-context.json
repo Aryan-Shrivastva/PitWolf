@@ -20,6 +20,11 @@
     ],
     "rule": "Never infer missing values from another circuit, a broadcast graphic, a previous season, or the generic analysis filter."
   },
+  "importWorkflow": {
+    "script": "backend/scripts/import_overtake_event_appendix.py",
+    "instructions": "backend/data/fia-docs/OVERTAKE_APPENDIX_IMPORT.md",
+    "rule": "Only a fully cited official FIA event document may set eventSpecificDataLoaded to true."
+  },
   "defaults": {
     "historical": {
       "status": "HISTORICAL_ANALYSIS_PROXY",
@@ -43,5 +48,111 @@
       ]
     }
   },
-  "events": {}
+  "events": {
+    "2026:2:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 5130.0,
+        "activationLineDistanceM": 5250.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_chinese_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-03-12",
+          "documentTitle": "2026 Chinese Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:4:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 4908.0,
+        "activationLineDistanceM": 5057.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_miami_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-04-30",
+          "documentTitle": "2026 Miami Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:5:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 3870.0,
+        "activationLineDistanceM": 3982.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_canadian_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-05-21",
+          "documentTitle": "2026 Canadian Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:6:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 2805.0,
+        "activationLineDistanceM": 2950.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_monaco_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-06-03",
+          "documentTitle": "2026 Monaco Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:8:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 3936.0,
+        "activationLineDistanceM": 4088.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_austrian_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-06-25",
+          "documentTitle": "2026 Austrian Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:10:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 6745.0,
+        "activationLineDistanceM": 6885.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_belgian_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-07-16",
+          "documentTitle": "2026 Belgian Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    },
+    "2026:11:r": {
+      "eventSpecificDataLoaded": false,
+      "zoneEvidence": {
+        "zoneEvidenceLoaded": true,
+        "officialDetectionGapS": 1.0,
+        "detectionLineDistanceM": 3974.0,
+        "activationLineDistanceM": 4121.0,
+        "eventAppendixSource": {
+          "url": "https://www.fia.com/system/files/decision-document/2026_hungarian_grand_prix_-_power_unit_information.pdf",
+          "published": "2026-07-22",
+          "documentTitle": "2026 Hungarian Grand Prix — Power Unit Information",
+          "articleOrSection": "Article B7.2 OVERTAKE table"
+        }
+      }
+    }
+  }
 }

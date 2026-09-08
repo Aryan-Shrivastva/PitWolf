@@ -14,6 +14,7 @@ import fastf1
 
 from extract_decision_points import OUT_ROOT, extract_race
 from fetch_f1_session import CACHE_DIR
+from overtake_feature_schema import FEATURE_SCHEMA_VERSION
 
 CACHE_ROOT = CACHE_DIR.parent
 
@@ -35,29 +36,44 @@ def wait_for_ondemand():
         time.sleep(5)
 
 
-def run_task(year, round_number, session_name, max_gap, hold_laps, attempts=5):
+def run_task(year, round_number, session_name, max_gap, hold_laps, delay_window_laps,
+             offline=False, attempts=5):
     target = OUT_ROOT / str(year) / f'{round_number}_{session_name.lower()}.json'
     if target.exists():
         try:
             cached = json.loads(target.read_text(encoding='utf-8'))
         except (OSError, json.JSONDecodeError):
             cached = None
-        if isinstance(cached, dict) and cached.get('schemaVersion') == 'decision-point.v5':
+        if (isinstance(cached, dict) and cached.get('schemaVersion') == 'decision-point.v6'
+                and cached.get('featureSchemaVersion') == FEATURE_SCHEMA_VERSION
+                and isinstance(cached.get('participants'), list)
+                and isinstance(cached.get('analysisRows'), list)
+                and isinstance(cached.get('driverSummaries'), list)):
             return 'skip'
     delay = 5
     for attempt in range(attempts):
         wait_for_ondemand()
         try:
-            payload = extract_race(year, round_number, session_name, max_gap, hold_laps)
-            if not payload.get('rows'):
-                raise RuntimeError('no decision points extracted')
+            payload = extract_race(
+                year, round_number, session_name, max_gap, hold_laps,
+                delay_window_laps,
+            )
+            # A race can legitimately contain no decision points inside the
+            # configured battle gap. Keep that empty v6 record so the cache
+            # audit distinguishes "no eligible battles" from missing data.
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_name(target.name + '.tmp')
             tmp.write_text(json.dumps(payload), encoding='utf-8')
             tmp.replace(target)
-            time.sleep(3)
+            if not offline:
+                time.sleep(3)
             return 'ok'
         except Exception as error:
+            if offline:
+                # Local caches are immutable during an offline run. Retrying a
+                # cache miss cannot help and would only delay later races.
+                print(f'OFFLINE MISS {year} R{round_number} {session_name}: {error}', flush=True)
+                return 'fail'
             if attempt == attempts - 1:
                 print(f'FAIL {year} R{round_number} {session_name}: {error}', flush=True)
                 return 'fail'
@@ -80,10 +96,15 @@ def main():
     parser.add_argument('--session', default='R')
     parser.add_argument('--max-gap', type=float, default=1.2)
     parser.add_argument('--hold-laps', type=int, default=6)
+    parser.add_argument('--delay-window-laps', type=int, default=5)
+    parser.add_argument('--offline', action='store_true',
+                        help='rebuild only from local FastF1 cache; missing source records are reported as failures')
     args = parser.parse_args()
 
     fastf1.set_log_level('ERROR')
     fastf1.Cache.enable_cache(str(CACHE_DIR))
+    if args.offline:
+        fastf1.Cache.offline_mode(True)
 
     tasks = []
     for year in range(args.start_year, args.end_year + 1):
@@ -98,7 +119,10 @@ def main():
     counts = {'ok': 0, 'skip': 0, 'fail': 0}
     started = time.time()
     for index, (year, round_number) in enumerate(tasks, 1):
-        status = run_task(year, round_number, args.session, args.max_gap, args.hold_laps)
+        status = run_task(
+            year, round_number, args.session, args.max_gap, args.hold_laps,
+            args.delay_window_laps, args.offline,
+        )
         counts[status] += 1
         if status != 'skip':
             print(f'[{index}/{len(tasks)}] {status} {year} R{round_number} ({time.time() - started:.0f}s)', flush=True)

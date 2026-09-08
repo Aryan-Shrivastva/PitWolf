@@ -201,6 +201,9 @@ def main():
 
     fastf1.set_log_level('ERROR')
     fastf1.Cache.enable_cache(str(CACHE_DIR))
+    # Energy views operate on locally cached sessions. Do not let an optional
+    # upstream refresh make a selected race look as though it failed to load.
+    fastf1.Cache.offline_mode(True)
     print(json.dumps(build_race_energy_payload(args.year, args.round, args.session, args.driver)))
 
 

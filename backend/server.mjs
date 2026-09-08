@@ -291,6 +291,7 @@ async function analyseEngineer(message, team) {
 
 const F1_CACHE_DIR = path.join(root, 'data', 'f1-cache')
 const OVERTAKE_RULE_CONTEXT_PATH = path.join(root, 'data', 'overtake-rule-context.json')
+const STRAIGHT_MODE_VISUAL_EVIDENCE_PATH = path.join(root, 'data', 'straight-mode-visual-evidence.json')
 
 function finiteRuleNumber(value, minimum = 0) {
   return Number.isFinite(Number(value)) && Number(value) >= minimum
@@ -310,6 +311,19 @@ function validateEventRuleContext(entry) {
   return { valid: errors.length === 0, errors }
 }
 
+function validateZoneEvidence(entry) {
+  const zone = entry?.zoneEvidence
+  const errors = []
+  if (zone?.zoneEvidenceLoaded !== true) errors.push('zoneEvidenceLoaded must be true')
+  if (!finiteRuleNumber(zone?.officialDetectionGapS, 0)) errors.push('zone officialDetectionGapS is required')
+  if (!finiteRuleNumber(zone?.detectionLineDistanceM, 0)) errors.push('zone detectionLineDistanceM is required')
+  if (!finiteRuleNumber(zone?.activationLineDistanceM, 0)) errors.push('zone activationLineDistanceM is required')
+  if (!zone?.eventAppendixSource?.url || !zone?.eventAppendixSource?.published) {
+    errors.push('zone eventAppendixSource.url and eventAppendixSource.published are required')
+  }
+  return { valid: errors.length === 0, errors }
+}
+
 async function ruleContextFor(payload, year, round, session) {
   // FIA publishes the Overtake Mode detection gap and track lines per event.
   // Keep a structured registry for those official appendices, but never invent
@@ -322,37 +336,55 @@ async function ruleContextFor(payload, year, round, session) {
   }
   const era = Number(year) >= 2026 ? '2026' : 'historical'
   const eventKey = `${year}:${round}:${f1Slug(session)}`
+  let visualRegistry
+  try {
+    visualRegistry = JSON.parse(await readFile(STRAIGHT_MODE_VISUAL_EVIDENCE_PATH, 'utf8'))
+  } catch {
+    visualRegistry = { schemaVersion: 'straight-mode-visual-evidence.v1', events: {} }
+  }
+  const straightModeEvidence = visualRegistry.events?.[eventKey] ?? null
   const eventEntry = registry.events?.[eventKey]
   const defaultEntry = registry.defaults?.[era] ?? {}
   const validation = eventEntry
     ? validateEventRuleContext(eventEntry)
     : { valid: false, errors: ['official event appendix not loaded'] }
+  const zoneValidation = eventEntry
+    ? validateZoneEvidence(eventEntry)
+    : { valid: false, errors: ['official FIA zone evidence not loaded'] }
   const configured = eventEntry && validation.valid
     ? eventEntry
     : eventEntry
       ? {
           ...defaultEntry,
-          status: 'EVENT_APPENDIX_INVALID',
+          ...(zoneValidation.valid ? { zoneEvidence: eventEntry.zoneEvidence } : {}),
+          status: zoneValidation.valid ? 'RETROSPECTIVE_ZONE_EVIDENCE_ONLY' : 'EVENT_APPENDIX_INVALID',
           eventSpecificDataLoaded: false,
           restrictions: [
             ...(defaultEntry.restrictions ?? []),
-            'The imported event appendix did not meet the source and field requirements; it is not used.',
+            zoneValidation.valid
+              ? 'Cited FIA Detection/Activation Line evidence is available for retrospective telemetry alignment only; a complete power/recharge profile is still required for a live command.'
+              : 'The imported event appendix did not meet the source and field requirements; it is not used.',
           ],
         }
       : defaultEntry
   return {
     ...configured,
+    ...(straightModeEvidence ? { straightModeEvidence } : {}),
     source: registry.source ?? null,
     eventKey,
-    eventAppendixSource: eventEntry?.eventAppendixSource ?? null,
+    eventAppendixSource: eventEntry?.eventAppendixSource ?? eventEntry?.zoneEvidence?.eventAppendixSource ?? null,
     validation: {
       eventSpecificDataAccepted: Boolean(eventEntry && validation.valid),
       errors: validation.errors,
+      zoneEvidenceAccepted: Boolean(eventEntry && zoneValidation.valid),
+      zoneEvidenceErrors: zoneValidation.errors,
     },
     analysisWindowGapS: payload.maxGapThresholdS ?? null,
     application: configured.eventSpecificDataLoaded
       ? 'TRACK_DISTANCE_ALIGNMENT_REQUIRED'
-      : 'DISCLOSURE_ONLY_UNTIL_EVENT_APPENDIX_LOADED',
+      : zoneValidation.valid
+        ? 'RETROSPECTIVE_TRACK_DISTANCE_ALIGNMENT_AVAILABLE'
+        : 'DISCLOSURE_ONLY_UNTIL_EVENT_APPENDIX_LOADED',
   }
 }
 
@@ -794,7 +826,7 @@ export async function handler(request, response) {
       // Older caches predate the current causal feature cutoff. Rebuild
       // only the requested race on demand so the frontend cannot silently
       // evaluate stale methodology.
-      if (!payload || payload.schemaVersion !== 'decision-point.v5') {
+      if (!payload || payload.schemaVersion !== 'decision-point.v6' || payload.featureSchemaVersion !== 'overtake-features.v1' || !Array.isArray(payload.participants) || !Array.isArray(payload.analysisRows) || !Array.isArray(payload.driverSummaries)) {
         const out = await runPython('extract_decision_points.py', [
           '--year', year, '--round', round, '--session', session,
         ], 600000)
@@ -809,12 +841,73 @@ export async function handler(request, response) {
     }
   }
 
+  // GET /api/f1/zoneopportunities?year&round&session — computes or returns
+  // official-FIA-line-aligned telemetry opportunities. This remains separate
+  // from the lap-start classifier rows until a future simulation view chooses
+  // to consume the higher-fidelity state.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/zoneopportunities') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const year = params.get('year') || ''
+    const round = params.get('round') || ''
+    const session = params.get('session') || 'R'
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(round)) {
+      return json(response, 400, { error: 'year and round are required' })
+    }
+    const cachePath = path.join(F1_CACHE_DIR, 'zone-opportunities', year, `${round}_${f1Slug(session)}.json`)
+    try {
+      let payload
+      try {
+        payload = JSON.parse(await readFile(cachePath, 'utf8'))
+      } catch {
+        const out = await runPython('extract_zone_opportunities.py', [
+          '--year', year, '--round', round, '--session', session, '--output',
+        ], 600000)
+        payload = JSON.parse(out)
+      }
+      return json(response, 200, payload)
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/zonereplays?year&round&session — cached, outcome-enriched
+  // zone records for the future simulation/validation screen. This endpoint
+  // never recomputes outcomes and retains the replay-only causal boundary.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/zonereplays') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const year = params.get('year') || ''
+    const round = params.get('round') || ''
+    const session = params.get('session') || 'R'
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(round)) {
+      return json(response, 400, { error: 'year and round are required' })
+    }
+    const cachePath = path.join(F1_CACHE_DIR, 'zone-replays', year, `${round}_${f1Slug(session)}.json`)
+    try {
+      const payload = JSON.parse(await readFile(cachePath, 'utf8'))
+      return json(response, 200, payload)
+    } catch {
+      return json(response, 404, {
+        error: `no cached zone replay for ${year} round ${round} ${session}`,
+        note: 'Generate cited-FIA-line opportunities and build a replay first; this endpoint does not infer missing event data.',
+      })
+    }
+  }
+
   // GET /api/f1/modelreport — trained-model provenance (temporal split, holdout
   // accuracy, feature importances) so the UI never hardcodes training facts.
   if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/modelreport') {
     try {
       const reportPath = path.join(F1_CACHE_DIR, 'models', 'overtake_report.json')
-      return json(response, 200, JSON.parse(await readFile(reportPath, 'utf8')))
+      const report = JSON.parse(await readFile(reportPath, 'utf8'))
+      let decisionLabelAudit = null
+      try {
+        const auditPath = path.join(F1_CACHE_DIR, 'models', 'decision-label-audit.v1.json')
+        decisionLabelAudit = JSON.parse(await readFile(auditPath, 'utf8'))
+      } catch {
+        // The audit is supplementary provenance. Older model reports remain
+        // readable when it has not yet been generated.
+      }
+      return json(response, 200, { ...report, decisionLabelAudit })
     } catch {
       return json(response, 404, { error: 'model not trained yet' })
     }
