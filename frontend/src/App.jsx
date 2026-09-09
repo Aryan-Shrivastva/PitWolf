@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import openingVideo from './assets/f1-opening-background.mp4'
 import './pitwolf.css'
-import { RaceSimView } from './components/RaceSimView'
+import { SimulationReplayView } from './components/SimulationReplayView'
 import { StrategyDashboard } from './components/StrategyDashboard'
 
 class AppErrorBoundary extends React.Component {
@@ -32,7 +32,7 @@ function App() {
   const [page, setPage] = useState('landing')
 
   if (page === 'sim') {
-    return <AppErrorBoundary><RaceSimView
+    return <AppErrorBoundary><SimulationReplayView
       onOpenDashboard={() => setPage('dashboard')}
       onHome={() => setPage('landing')}
     /></AppErrorBoundary>
@@ -56,7 +56,7 @@ function App() {
       <h1>Make the<br /><em>Strategic call.</em></h1>
       <p className="pitwolf-copy">focused race-strategy workspace for understanding when to attack, when to save, and when the next opportunity is worth waiting for.</p>
       <button className="pitwolf-cta" onClick={() => setPage('sim')}>
-        OPEN PITWOLF DASHBOARD <span>↗</span>
+        OPEN PITWOLF SIMULATION <span>↗</span>
       </button>
     </section>
   </main>

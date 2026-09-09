@@ -243,7 +243,183 @@ def best_response(row: dict[str, Any] | None, opponent_soc: float, our_soc: floa
     return selected, round(scores[selected], 4)
 
 
+def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a future-blind, two-car policy rollout from one recorded snapshot.
+
+    This deliberately does *not* receive later decision rows.  The classifier
+    signal and public context at the chosen lap are carried forward while both
+    cars' modelled SoC and their probability of pair-order reversal evolve.
+    It is therefore a race-to-flag energy/overtake policy experiment, not a
+    reconstructed full-grid race or a claim about private team strategy.
+    """
+    focus = payload.get("focus") or {}
+    selected = str(focus.get("driver") or "")
+    opponent = str(focus.get("defender") or "")
+    start_lap = int(number(focus.get("lap"), 1))
+    total_laps = max(start_lap, int(number(payload.get("totalLaps"), start_lap)))
+    regulation_era = str(payload.get("regulationEra") or era_for_year(payload.get("year")))
+    energy_config = get_era_config(regulation_era)
+    energy_laps = payload.get("energyLaps", {})
+    state = {
+        "lap": start_lap,
+        "ahead": number(focus.get("position"), 99) < number(focus.get("defenderPosition"), 99),
+        "aheadProbability": 1.0 if number(focus.get("position"), 99) < number(focus.get("defenderPosition"), 99) else 0.0,
+        "ourSoc": soc_from_laps(energy_laps, selected, start_lap),
+        "defenderSoc": soc_from_laps(energy_laps, opponent, start_lap),
+    }
+    initial_ahead = state["ahead"]
+    path: list[dict[str, Any]] = []
+    action_changes: list[dict[str, Any]] = []
+    last_action = None
+
+    while state["lap"] <= total_laps:
+        candidates = []
+        for action in ACTIONS:
+            our_soc, deploy, harvest = transition_soc(
+                state["ourSoc"], action, focus, state["ahead"], era=regulation_era)
+            opponent_action, response_score = best_response(
+                focus, state["defenderSoc"], state["ourSoc"], state["ahead"], regulation_era)
+            opponent_soc, opponent_deploy, opponent_harvest = transition_soc(
+                state["defenderSoc"], opponent_action, focus, not state["ahead"], era=regulation_era)
+            if state["ahead"]:
+                repass = attack_chance(focus, opponent_action, opponent_soc, our_soc, True)
+                next_ahead = state["aheadProbability"] * max(0.02, min(0.99, 1.0 - repass))
+                event_probability = 1.0 - repass
+            else:
+                pass_probability = attack_chance(focus, action, our_soc, opponent_soc, False)
+                next_ahead = state["aheadProbability"] + ((1.0 - state["aheadProbability"]) * pass_probability)
+                event_probability = pass_probability
+            # This policy score selects the action using only the current
+            # carried state.  It has no access to a future lap, result, pit
+            # event, race-control event, or future public timing row.
+            utility = (100.0 * next_ahead) + (RESERVE_WEIGHT * our_soc) + (4.0 * event_probability)
+            candidates.append({
+                "action": action,
+                "probability": round(event_probability, 4),
+                "aheadProbability": round(next_ahead, 4),
+                "ourSoc": round(our_soc, 3),
+                "defenderSoc": round(opponent_soc, 3),
+                "deployMj": deploy,
+                "harvestMj": harvest,
+                "opponentAction": opponent_action,
+                "opponentDeployMj": opponent_deploy,
+                "opponentHarvestMj": opponent_harvest,
+                "opponentResponseScore": response_score,
+                "utility": utility,
+            })
+        chosen = max(candidates, key=lambda candidate: candidate["utility"])
+        entry = {key: chosen[key] for key in (
+            "action", "probability", "aheadProbability", "ourSoc", "defenderSoc",
+            "deployMj", "harvestMj", "opponentAction", "opponentDeployMj",
+            "opponentHarvestMj", "opponentResponseScore")}
+        entry.update({
+            "lap": state["lap"],
+            "role": "DEFENDING" if state["ahead"] else "ATTACKING",
+            "contextSource": "START_STATE_CARRIED_FUTURE_BLIND",
+            "pitPlan": "NO BOX MODEL · START STATE CARRIED",
+        })
+        path.append(entry)
+        if chosen["action"] != last_action:
+            action_changes.append({
+                "lap": state["lap"],
+                "action": chosen["action"],
+                "opponentAction": chosen["opponentAction"],
+                "ourSoc": chosen["ourSoc"],
+                "defenderSoc": chosen["defenderSoc"],
+                "aheadProbability": chosen["aheadProbability"],
+            })
+            last_action = chosen["action"]
+        state = {
+            "lap": state["lap"] + 1,
+            "ahead": chosen["aheadProbability"] >= 0.5,
+            "aheadProbability": chosen["aheadProbability"],
+            "ourSoc": chosen["ourSoc"],
+            "defenderSoc": chosen["defenderSoc"],
+        }
+
+    finish_positions = payload.get("finishPositions") or {}
+    actual_finish = finish_positions.get(selected)
+    opponent_finish = finish_positions.get(opponent)
+    actual_pair_ahead = (
+        isinstance(actual_finish, (int, float)) and isinstance(opponent_finish, (int, float))
+        and actual_finish < opponent_finish
+    )
+    modelled_pair_ahead = bool(path and path[-1]["aheadProbability"] >= 0.5)
+    root_context = context(focus)
+    rule_context = payload.get("ruleContext") if isinstance(payload.get("ruleContext"), dict) else {}
+    rule_application = (
+        "TRACK_DISTANCE_ALIGNMENT_REQUIRED"
+        if rule_context.get("eventSpecificDataLoaded")
+        else "DISCLOSURE_ONLY_UNTIL_EVENT_APPENDIX_LOADED"
+    )
+    return {
+        "schemaVersion": "race-branch.v1",
+        "treeVersion": "future-blind-two-car-rollout.v1",
+        "mode": "FUTURE_BLIND_RACE_ROLLOUT",
+        "tree": {
+            "lap": start_lap,
+            "ourSoc": round(soc_from_laps(energy_laps, selected, start_lap), 3),
+            "defenderSoc": round(soc_from_laps(energy_laps, opponent, start_lap), 3),
+            "bestAction": path[0]["action"] if path else None,
+            "children": [],
+        },
+        "path": path,
+        "horizon": len(path),
+        "startLap": start_lap,
+        "finishLap": total_laps,
+        "selectedRoleAtJump": str(focus.get("selectedRole") or ("DEFENDING" if initial_ahead else "ATTACKING")),
+        "actionChanges": action_changes,
+        "modelledPairAheadAtFlag": modelled_pair_ahead,
+        "modelledPairAheadProbabilityAtFlag": path[-1]["aheadProbability"] if path else 0.0,
+        "actualPairAheadAtFlag": actual_pair_ahead,
+        "actualFinishPosition": actual_finish,
+        "opponentFinishPosition": opponent_finish,
+        "fullGridFinishForecast": None,
+        "finishComparison": {
+            "pairOrderMatchesObserved": modelled_pair_ahead == actual_pair_ahead,
+            "fullGridComparable": False,
+            "reason": "Only the selected pair is modelled. No full-grid pace, pit, tyre, traffic, retirement, or race-control counterfactual is available.",
+        },
+        "stateProvenance": {
+            "horizonLaps": len(path),
+            "observedContextLaps": 1 if path else 0,
+            "carriedContextLaps": max(0, len(path) - 1),
+            "sourceCounts": {"START_STATE_CARRIED_FUTURE_BLIND": len(path)},
+            "note": "The branch receives only the selected-lap public state. Every later step carries and evolves model state; later recorded race rows are excluded from policy input.",
+        },
+        "decisionContext": {
+            "raceControl": "CLEAR" if root_context["track_clear"] else "GATED",
+            "pitDistorted": root_context["pit_distorted"],
+            "attackerTrackStatus": focus.get("attackerTrackStatus"),
+            "defenderTrackStatus": focus.get("defenderTrackStatus"),
+            "overtakeActionsEnabled": root_context["track_clear"] and not root_context["pit_distorted"],
+            "ruleContext": {**rule_context, "application": rule_application},
+        },
+        "opponentPolicy": {
+            "id": "CONSERVATIVE_BEST_RESPONSE_HEURISTIC_V1",
+            "type": "DETERMINISTIC_CONSERVATIVE_BEST_RESPONSE",
+            "description": "At each simulated lap the opposing car selects the response that maximises its modelled immediate objective using only carried state.",
+        },
+        "energyModelVersion": ENERGY_MODEL_VERSION,
+        "regulationEra": regulation_era,
+        "energyConfig": {
+            "id": energy_config["id"],
+            "capacityMj": energy_config["capacityMj"],
+            "calibrationStatus": energy_config["calibrationStatus"],
+            "source": energy_config["source"],
+        },
+        "assumptions": [
+            "The rollout is future-blind: later recorded rows are not supplied to the policy.",
+            "SoC is a public-data model surrogate, not private battery telemetry.",
+            "Only the selected car and its starting attack target are simulated.",
+            "A full-grid finish forecast is intentionally unavailable until pit, tyre, traffic, pace, retirement and race-control models exist.",
+        ],
+    }
+
+
 def build_tree(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("mode") == "FUTURE_BLIND_RACE_ROLLOUT":
+        return rollout_to_finish(payload)
     focus = payload.get("focus") or {}
     rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
     selected = str(focus.get("driver") or "")

@@ -680,7 +680,9 @@ export async function handler(request, response) {
     const year = params.get('year') || ''
     if (!/^\d{4}$/.test(year)) return json(response, 400, { error: 'a valid year is required' })
     try {
-      return json(response, 200, await f1CachedOrFetch(`events/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000))
+      // v2 distinguishes scheduled events from rounds that actually have the
+      // cached timing/position data required by the recorded replay.
+      return json(response, 200, await f1CachedOrFetch(`events/v2/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000))
     } catch (error) {
       return json(response, 502, { error: error.message })
     }
@@ -717,6 +719,53 @@ export async function handler(request, response) {
     try {
       const cacheRel = `telemetry/${year}/${round}_${f1Slug(session)}/${driver}_${lap}.json`
       return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_telemetry.py', ['--year', year, '--round', round, '--session', session, '--driver', driver, '--lap', lap], 300000))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/replaywindow?year&round&session&driver&lap — compact public
+  // position frames for one recorded lap.  This is the visual replay foundation
+  // only: it does not contain a counterfactual or modelled pass outcome.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/replaywindow') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const year = params.get('year') || ''
+    const round = params.get('round') || ''
+    const session = params.get('session') || ''
+    const driver = (params.get('driver') || '').toUpperCase()
+    const lap = params.get('lap') || ''
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(round) || !session || !/^[A-Z]{3}$/.test(driver) || !/^\d{1,3}$/.test(lap)) {
+      return json(response, 400, { error: 'year, round, session, driver and lap are required' })
+    }
+    try {
+      // v4 adds timestamped official FastF1 timing-stream position and gaps
+      // to each GPS frame. Do not serve old map-distance-ranked replays as if
+      // their P-values were authoritative.
+      const cacheRel = `replay-window/v4/${year}/${round}_${f1Slug(session)}/${driver}_${lap}.json`
+      return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_replay_window.py', [
+        '--year', year, '--round', round, '--session', session, '--driver', driver, '--lap', lap,
+      ], 300000))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/racereplay?year&round&session — a compact, complete recorded
+  // race timeline. It is not a counterfactual: the client uses it for normal
+  // continuous playback and can jump to a real lap boundary before branching.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/racereplay') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const year = params.get('year') || ''
+    const round = params.get('round') || ''
+    const session = params.get('session') || ''
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(round) || !session) {
+      return json(response, 400, { error: 'year, round and session are required' })
+    }
+    try {
+      const cacheRel = `race-replay/v1/${year}/${round}_${f1Slug(session)}.json`
+      return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_replay_window.py', [
+        '--year', year, '--round', round, '--session', session, '--full-race',
+      ], 600000))
     } catch (error) {
       return json(response, 502, { error: error.message })
     }
@@ -950,7 +999,10 @@ export async function handler(request, response) {
       return json(response, 400, { error: 'year, round and session are required' })
     }
     try {
-      const cacheRel = `trackmap/${year}/${round}_${f1Slug(session)}.json`
+      // v3 uses FastF1 CircuitInfo's numbered corner sequence, projected on
+      // the recorded centre line. This supersedes the unsafe curvature-based
+      // turn-number heuristic used by earlier cached maps.
+      const cacheRel = `trackmap/v3/${year}/${round}_${f1Slug(session)}.json`
       return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_trackmap.py', ['--year', year, '--round', round, '--session', session], 240000))
     } catch (error) {
       return json(response, 502, { error: error.message })

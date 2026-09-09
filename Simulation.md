@@ -32,40 +32,45 @@ readout, a driver board, and replay controls.
 ## Core experience
 
 1. Select season, race, session, and a recorded lap/time.
-2. Select an attacker and defender from a detected close battle.
+2. Select one driver. Resolve the car immediately ahead as the attack target
+   and the car immediately behind as the defence threat from the recorded
+   classification at that instant.
 3. Load their actual observed state at that instant: track distance, gap,
    relative speed, tyres, lap context, modelled state of charge (SoC), and
    race-control context.
 4. Show all cars on the track. Initially, non-selected cars remain recorded
    visual "ghost" cars so the simulator does not pretend to model the entire
    field.
-5. Press Play to advance the branch. At each valid decision window, PitWolf
-   evaluates ATTACK, SAVE, and DELAY for the selected attacker and computes a
-   conservative defender response.
-6. Animate changes to the selected pair's gap, energy state, and position.
-7. Show whether a simulated pass occurs and whether the projected gained
-   position is retained over the configured horizon.
-8. Show the equivalent observed outcome from the real race beside the branch.
+5. While the observed replay is running, choose a lap in `JUMP / BRANCH LAP`.
+   Press `JUMP` to freeze the public state at that lap and begin a separate
+   PitWolf branch from it.
+6. The branch receives no later recorded decision rows. At each simulated lap,
+   PitWolf evaluates ATTACK, SAVE, and DELAY for the selected car and applies a
+   conservative response for its starting attack target.
+7. Continue the branch to the chequered flag and compare its modelled
+   selected-pair order with the observed final pair order from the real race.
 
-The first version is a **two-car, bounded-horizon simulation**. It does not
-claim to simulate every team strategy, radio call, tyre choice, weather shift,
-or the rest of the race grid.
+The current version is a **future-blind, two-car race-to-flag rollout**. It
+does not claim to simulate every team strategy, radio call, tyre choice,
+weather shift, pit stop, retirement, race-control event, or the rest of the
+race grid. Therefore it must not label a projected pair result as a full-grid
+counterfactual finishing position.
 
 ## Required screen areas
 
 ### 1. Race and branch controls
 
 - season, race, session;
-- recorded lap/time and a scrubber;
-- attacker and defender;
+- recorded lap/time selector and a `JUMP` action that starts the branch;
+- one selected driver, with automatic attacking and defending relationships;
 - branch mode: `OBSERVED REPLAY` or `PITWOLF BRANCH`;
 - Play, Pause, Restart, speed, and reset controls;
-- horizon selector, initially 1–6 laps.
+- a branch status showing the selected start lap and flag lap.
 
 ### 2. Animated track view
 
 - circuit map with all participants at recorded positions;
-- highlighted attacker and defender;
+- highlighted selected driver, attack target, and defence threat;
 - direction of travel and current lap/time;
 - visible zone/detection/activation markers only where their source and
   track-distance alignment are known;
@@ -77,11 +82,11 @@ or the rest of the race grid.
 For the selected pair, show:
 
 - running position and gap;
-- attacker and defender modelled SoC in MJ;
+- selected driver and attack-target modelled SoC in MJ;
 - tyre/lap context and race-control state;
 - next eligible decision window;
 - action probabilities for ATTACK, SAVE, and DELAY;
-- current selected action and defender response;
+- current selected action and conservative opponent response;
 - pass probability and durable-position probability;
 - uncertainty and FIA command-gate status.
 
@@ -188,6 +193,35 @@ validation is strong enough.
 
 ## Phased delivery
 
+## Current implementation status
+
+- **Implemented:** the former static Las Vegas screen is now a selectable
+  recorded-race replay. It uses cached public FastF1 circuit/position streams,
+  a shared session clock, all recorded cars as visual ghosts, replay controls,
+  and an exact-lap selected battle panel.
+- **Implemented:** for an extracted pair and exact lap, the screen scores the
+  existing action model and runs the existing bounded two-car strategy tree.
+  It shows action probabilities, modelled SoC, the conservative opponent
+  response assumption, and a 1–6 lap path.
+- **Implemented:** `OBSERVED` and `PITWOLF BRANCH` views. Select a lap and
+  press `JUMP` to create a future-blind, two-car race-to-flag rollout. The
+  branch receives the selected public state only; subsequent policy steps use
+  carried model state rather than later recorded decision rows.
+- **Implemented in part:** the flag comparison shows modelled selected-pair
+  order and probability, observed selected-pair order, real selected-driver
+  finish, modelled energy-window status, and the FIA command gate. It
+  explicitly withholds a modelled full-grid finishing position.
+- **Deliberately withheld:** Always SAVE, fixed-deployment, and gap-only
+  baseline results remain unavailable until each baseline has been evaluated
+  with the same held-out protocol. The screen says this explicitly rather than
+  presenting unvalidated comparison data.
+- **Still deliberately absent:** a modelled car is not moved through a
+  fabricated pass trajectory. The model supplies probabilities, not
+  counterfactual GPS. No marker is treated as an FIA eligibility line, and no
+  result is shown as a live command. Until event-specific FIA lines are
+  distance-aligned, the branch stays `ANALYSIS ONLY` and the field remains
+  recorded replay data.
+
 ### Phase 1 — recorded visual replay
 
 Build the track player from cached position data: selectors, driver board,
@@ -199,16 +233,21 @@ counterfactual decision is shown yet.
 Allow selection of a detected attacker/defender decision point. Display the
 real state at that instant and visually identify the pair on the circuit.
 
-### Phase 3 — bounded PitWolf branch
+### Phase 3 — future-blind PitWolf race branch
 
-Run the existing attacker/defender action and energy logic through a short
-horizon. Overlay the modelled pair's branch over the recorded replay and show
-the action/reaction/event log.
+Freeze one real two-car state at `JUMP`, exclude all later recorded decision
+rows, and roll the existing action/energy logic to the flag. Overlay the
+modelled pair's state over recorded ghosts and show the action/reaction event
+log. Do not invent counterfactual car movement; only animate a pass when a
+calibrated trajectory model exists.
 
 ### Phase 4 — outcome and baseline comparison
 
-Add observed outcome, pass/durability probability, energy-window checks, and
-the Always SAVE/fixed-deployment/gap-only comparisons.
+The observed/modelled selected-pair flag comparison, energy-window checks, and
+FIA command gate are now shown. Next, implement and evaluate the Always SAVE,
+fixed-deployment, and gap-only baselines before displaying policy comparison.
+Build a full-field pace, tyre, BOX, traffic, retirement, and race-control model
+before making any better/worse/same full-race finishing-position claim.
 
 ### Phase 5 — FIA zone fidelity
 

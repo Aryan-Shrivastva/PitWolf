@@ -12,6 +12,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 14,
       "imageOrder": 1,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -26,6 +27,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 16,
       "imageOrder": 2,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -39,6 +41,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 18,
       "imageOrder": 3,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -50,6 +53,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 14,
       "imageOrder": 4,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -63,6 +67,7 @@
       "status": "STRAIGHT_MODE_DISABLED_REFERENCE",
       "enabled": false,
       "coordinateStatus": "NO_STRAIGHT_MODE_ZONES",
+      "cornerCount": 19,
       "imageOrder": 5,
       "zones": [],
       "overtakeMarkerReference": { "detection": "between T16 and T17", "activation": "between T18 and T19", "status": "VISUAL_REFERENCE_ONLY" }
@@ -71,6 +76,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 14,
       "imageOrder": 6,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -84,6 +90,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 10,
       "imageOrder": 7,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -97,6 +104,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 18,
       "imageOrder": 8,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -110,6 +118,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 19,
       "imageOrder": 9,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Short start/finish run" },
@@ -124,6 +133,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 14,
       "imageOrder": 10,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
@@ -137,6 +147,7 @@
       "status": "TURN_RANGE_REFERENCE",
       "enabled": true,
       "coordinateStatus": "TURN_RANGE_ONLY_NOT_TRACK_DISTANCE_MAPPED",
+      "cornerCount": 14,
       "imageOrder": 11,
       "zones": [
         { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Start/finish straight" },
