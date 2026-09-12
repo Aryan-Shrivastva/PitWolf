@@ -30,15 +30,21 @@ class AppErrorBoundary extends React.Component {
 
 function App() {
   const [page, setPage] = useState('landing')
+  const [simRequest, setSimRequest] = useState(null)
 
   if (page === 'sim') {
     return <AppErrorBoundary><SimulationReplayView
+      initialRequest={simRequest}
+      onRequestConsumed={() => setSimRequest(null)}
       onOpenDashboard={() => setPage('dashboard')}
-      onHome={() => setPage('landing')}
+      onHome={() => { setSimRequest(null); setPage('landing') }}
     /></AppErrorBoundary>
   }
   if (page === 'dashboard') {
-    return <AppErrorBoundary><StrategyDashboard onHome={() => setPage('landing')} /></AppErrorBoundary>
+    return <AppErrorBoundary><StrategyDashboard
+      onHome={() => setPage('landing')}
+      onOpenSimulation={(request) => { setSimRequest(request || null); setPage('sim') }}
+    /></AppErrorBoundary>
   }
 
   return <main className="pitwolf-landing">

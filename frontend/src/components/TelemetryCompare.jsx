@@ -128,7 +128,7 @@ export function TelemetryCompare({ selectedLaps, onLapsChange }) {
   if (!selectedLaps.length) {
     return <section className="lx-root tc-root">
       <div className="lx-panel-head"><span>TELEMETRY COMPARISON</span><em>0 LAPS</em></div>
-      <p className="lx-empty">Select laps in the TRACK tab lap table, or press COMPARE FASTEST LAPS there.</p>
+      <p className="lx-empty">Pick an incident above and press SHOW THIS LAP ON THE TRACE, or select laps in the TRACK tab.</p>
     </section>
   }
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchEnergyLap } from '../lib/f1api'
+import { fetchBatteryClip, fetchEnergyLap, fetchRecommend } from '../lib/f1api'
 import '../simulationreplay.css'
 
 const YEARS = [2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018]
@@ -15,6 +15,37 @@ const SESSION_LABELS = {
   Race: 'Race',
 }
 const FALLBACK_COLORS = ['#63e6be', '#ff7043', '#a9bfff', '#ffbf69', '#f472b6', '#2dd4bf']
+
+function sessionNameOf(session) {
+  if (!session || session === 'R') return 'Race'
+  if (session === 'Q') return 'Qualifying'
+  if (session === 'S') return 'Sprint'
+  return session
+}
+
+function mapForcedAction(call) {
+  if (call === 'ATTACK' || call === 'SAVE') return call
+  if (call === 'HOLD' || call === 'DELAY') return 'DELAY'
+  return null
+}
+
+function dummyWhatIfPred(action) {
+  const forced = mapForcedAction(action) || 'DELAY'
+  const probabilities = { ATTACK: 0.15, SAVE: 0.15, DELAY: 0.15 }
+  probabilities[forced] = 0.7
+  return { label: forced, probabilities }
+}
+
+function selectionFromRequest(request) {
+  if (!request) return { year: 2026, round: 1, session: 'Race', driver: 'RUS', lap: 1 }
+  return {
+    year: Number(request.year) || 2026,
+    round: Number(request.round) || 1,
+    session: sessionNameOf(request.session),
+    driver: request.driver || 'RUS',
+    lap: Number(request.lap) || 1,
+  }
+}
 
 function requestJson(url) {
   return fetch(url).then(async (response) => {
@@ -283,6 +314,219 @@ function AutoRoleControl({ label, driver, info, emptyLabel }) {
   </div>
 }
 
+function fieldStep(field, driver, lap) {
+  if (!field?.drivers || !driver) return null
+  const row = field.drivers.find((item) => item.driver === driver)
+  const laps = row?.laps ?? []
+  const target = Number(lap)
+  return laps.find((item) => Number(item.lap) === target)
+    ?? [...laps].reverse().find((item) => Number(item.lap) <= target)
+    ?? laps[0]
+    ?? null
+}
+
+function formatLapTime(seconds) {
+  if (!Number.isFinite(Number(seconds))) return '—'
+  const value = Number(seconds)
+  const minutes = Math.floor(value / 60)
+  return `${minutes}:${(value - minutes * 60).toFixed(3).padStart(6, '0')}`
+}
+
+function fieldDriver(field, driver) {
+  return field?.drivers?.find((item) => item.driver === driver) ?? null
+}
+
+function lapsInDrsSoFar(row, currentLap, gapLimit = 1) {
+  const past = (row?.laps ?? []).filter((step) => Number(step.lap) <= Number(currentLap))
+  if (!past.length) return 0
+  const now = past[past.length - 1]
+  if (!now?.ahead || now.isPitLap || Number(now.gapToAheadS ?? 99) > gapLimit) return 0
+  let held = 0
+  for (let index = past.length - 1; index >= 0; index -= 1) {
+    const step = past[index]
+    if (step.isPitLap || step.ahead !== now.ahead || Number(step.gapToAheadS ?? 99) > gapLimit) break
+    held += 1
+  }
+  return held
+}
+
+function paceWindow(row, lap, count = 5) {
+  return (row?.laps ?? []).filter((step) => Number(step.lap) <= Number(lap) && !step.isPitLap).slice(-count)
+}
+
+function averageLap(steps) {
+  if (!steps.length) return null
+  return steps.reduce((sum, step) => sum + Number(step.lapTimeS), 0) / steps.length
+}
+
+function pickBenchmark(field, selected, ahead, behind) {
+  const present = new Set((field?.drivers ?? []).map((item) => item.driver))
+  const preferred = ['NOR', 'VER', 'LEC', 'PIA', 'HAM', 'RUS', 'ANT']
+  return preferred.find((code) => present.has(code) && code !== selected && code !== ahead && code !== behind)
+    ?? (behind && behind !== selected ? behind : null)
+}
+
+function modelledPct(step, progress = 1) {
+  const model = step?.modelled
+  if (!model) return null
+  const start = Number(model.startPct)
+  const end = Number(model.endPct)
+  const fraction = Math.max(0, Math.min(1, progress))
+  const trough = Math.max(0, Math.min(100, start - (Number(model.consumedMj) / 4) * 100))
+  if (fraction < 0.45) return start + (trough - start) * (fraction / 0.45)
+  return trough + (end - trough) * ((fraction - 0.45) / 0.55)
+}
+
+function nowcastLines({ selected, benchmark, selectedRow, benchRow, selectedStep, aheadStep, behindStep, benchStep, progress }) {
+  const lines = []
+  if (aheadStep && selectedStep?.ahead) {
+    if (aheadStep.lapTimeS < selectedStep.lapTimeS && selectedStep.gapToAheadS <= 2) {
+      lines.push(`${selectedStep.ahead} was faster this lap and is ${selectedStep.gapToAheadS.toFixed(2)}s ahead. ${selected} should not force a push on this lap.`)
+    } else if (selectedStep.closingRateS >= 0.12 && selectedStep.gapToAheadS <= 1.3) {
+      lines.push(`${selected} was catching ${selectedStep.ahead} by ${selectedStep.closingRateS.toFixed(2)}s on this lap.`)
+    } else {
+      lines.push(`${selectedStep.ahead} is ${selectedStep.gapToAheadS.toFixed(2)}s up the road on this lap.`)
+    }
+  }
+  if (benchRow && selectedRow && selectedStep && benchmark) {
+    const ours = averageLap(paceWindow(selectedRow, selectedStep.lap))
+    const theirs = averageLap(paceWindow(benchRow, selectedStep.lap))
+    if (ours != null && theirs != null) {
+      const delta = ours - theirs
+      if (delta > 0.08) {
+        lines.push(`${benchmark} has been ${delta.toFixed(2)}s quicker than ${selected} over the last timed laps so far.`)
+      } else if (delta < -0.08) {
+        lines.push(`${selected} has been ${Math.abs(delta).toFixed(2)}s quicker than ${benchmark} over the last timed laps so far.`)
+      }
+    }
+  }
+  if (behindStep?.closingRateS >= 0.15 && behindStep.gapToAheadS <= 1.4) {
+    lines.push(`${selectedStep.behind} was catching ${selected} on this lap.`)
+  }
+  const batteryPeople = [
+    { code: selected, step: selectedStep },
+    { code: selectedStep?.ahead, step: aheadStep },
+    { code: benchmark, step: benchStep },
+  ].filter((item) => item.code && item.step?.modelled)
+  batteryPeople.forEach((item) => {
+    const pct = modelledPct(item.step, progress)
+    if (pct == null) return
+    const using = item.step.modelled.action === 'ATTACK' || item.step.modelled.consumedMj > item.step.modelled.harvestedMj
+    lines.push(`MODELLED ES · ${item.code} ${Math.round(pct)}% (${using ? 'using' : 'rebuilding'} this lap, started 100%). Not team battery.`)
+  })
+  return lines.slice(0, 3)
+}
+
+function DriverCompareCard({ label, code, step, progress }) {
+  if (!code || !step) return <div className="sim-compare-card is-empty"><b>{label}</b><span>NO CAR</span></div>
+  const pct = modelledPct(step, progress)
+  return <div className="sim-compare-card">
+    <b>{label} · P{step.timingPosition} {code}</b>
+    <strong>{formatLapTime(step.lapTimeS)}</strong>
+    <span>{step.event}{step.gapToAheadS > 0 ? ` · +${step.gapToAheadS.toFixed(2)}s` : ''}{pct == null ? '' : ` · MODELLED ${Math.round(pct)}%`}</span>
+  </div>
+}
+
+function RaceFieldHud({ field, driver, playbackLap, playhead, loading, error, event }) {
+  const selectedRow = fieldDriver(field, driver)
+  const selectedStep = fieldStep(field, driver, playbackLap?.lap)
+  const ahead = selectedStep?.ahead
+  const behind = selectedStep?.behind
+  const benchmark = pickBenchmark(field, driver, ahead, behind)
+  const benchRow = fieldDriver(field, benchmark)
+  const aheadStep = fieldStep(field, ahead, selectedStep?.lap)
+  const behindStep = fieldStep(field, behind, selectedStep?.lap)
+  const benchStep = fieldStep(field, benchmark, selectedStep?.lap)
+  const span = Math.max(0.001, Number(playbackLap?.endT) - Number(playbackLap?.startT))
+  const progress = playbackLap ? Math.max(0, Math.min(1, (Number(playhead) - Number(playbackLap.startT)) / span)) : 1
+  const lastLap = Math.max(1, ...(selectedRow?.laps ?? []).map((step) => Number(step.lap) || 0))
+  const [recommend, setRecommend] = useState({ idle: true })
+  const [recsOpen, setRecsOpen] = useState(false)
+
+  useEffect(() => {
+    if (!selectedStep || !driver) {
+      setRecommend({ idle: true })
+      return undefined
+    }
+    let live = true
+    setRecommend({ loading: true })
+    fetchRecommend({
+      year: event?.year,
+      location: event?.location,
+      driver,
+      ahead,
+      behind,
+      lap: selectedStep.lap,
+      gapS: selectedStep.gapToAheadS,
+      closingRateS: selectedStep.closingRateS,
+      position: selectedStep.timingPosition,
+      lapFraction: selectedStep.lap / lastLap,
+      deltaToPrevS: selectedStep.deltaToPrevS,
+      modelledLeftPct: selectedStep.modelled?.endPct,
+      modelledUsedMj: selectedStep.modelled?.usedMj,
+      lapsInDrs: lapsInDrsSoFar(selectedRow, selectedStep.lap),
+      behindClose: Boolean(behindStep && behindStep.gapToAheadS <= 1.2),
+    }).then((data) => {
+      if (live) setRecommend(data?.error ? { error: data.error } : { data })
+    }).catch((err) => {
+      if (live) setRecommend({ error: err.message })
+    })
+    return () => { live = false }
+  }, [driver, selectedStep?.lap, selectedStep?.gapToAheadS, selectedStep?.closingRateS, selectedStep?.timingPosition, ahead, behind, event?.year, event?.location, lastLap, behindStep?.gapToAheadS, selectedStep?.deltaToPrevS, selectedStep?.modelled?.endPct, selectedStep?.modelled?.usedMj])
+
+  if (loading) {
+    return <aside className="sim-field-bar is-loading" aria-live="polite">LOADING RECORDED FIELD…</aside>
+  }
+  if (error) {
+    return <aside className="sim-field-bar is-error"><span>FIELD UNAVAILABLE</span><em>{error}</em></aside>
+  }
+  if (!selectedRow || !selectedStep) return null
+  const observed = nowcastLines({
+    selected: driver, benchmark, selectedRow, benchRow,
+    selectedStep, aheadStep, behindStep, benchStep, progress,
+  })
+  const modelLines = recommend.data?.lines ?? []
+  const holdout = recommend.data?.holdout
+  const visibleTicks = (selectedRow.laps ?? []).filter((step) => Number(step.lap) <= Number(selectedStep.lap))
+  const tone = recommend.data?.action === 'PUSH' ? 'is-overtake' : selectedStep.event === 'SLOW' ? 'is-slow' : selectedStep.event === 'PIT' ? 'is-pit' : ''
+  return <aside className={`sim-field-bar is-compare ${tone}`} aria-label="Driver comparison field">
+    <div className="sim-compare-row">
+      <DriverCompareCard label="SELECTED" code={driver} step={selectedStep} progress={progress} />
+      <DriverCompareCard label="AHEAD" code={ahead} step={aheadStep} progress={progress} />
+      <DriverCompareCard label="COMPARE" code={benchmark} step={benchStep} progress={progress} />
+    </div>
+    <div className="sim-field-ticks" role="img" aria-label="Lap events so far for the selected driver">
+      {visibleTicks.map((step) => (
+        <i
+          key={step.lap}
+          className={`is-${step.event.toLowerCase()}${step.lap === selectedStep.lap ? ' is-current' : ''}`}
+          title={`L${step.lap} ${step.event}`}
+        />
+      ))}
+    </div>
+    <div className={`sim-field-recs${recommend.data?.action === 'PUSH' ? ' is-push' : ' is-hold'}${recsOpen ? ' is-open' : ' is-closed'}`}>
+      <button
+        type="button"
+        className="sim-recs-toggle"
+        aria-expanded={recsOpen}
+        aria-controls="sim-field-recs-body"
+        onClick={() => setRecsOpen((open) => !open)}
+      >
+        <b>L{selectedStep.lap} · {recommend.data?.action || (recommend.loading ? 'SCORING' : 'RECS')} · PRIOR RACES</b>
+        <span>{recsOpen ? 'HIDE ▴' : 'SHOW ▾'}</span>
+      </button>
+      {recsOpen && <div id="sim-field-recs-body" className="sim-field-recs-body">
+        <i>NOT THIS GP’S FUTURE</i>
+        {observed.map((line) => <strong key={line}>{line}</strong>)}
+        {recommend.loading && <strong>Scoring push / recover from trained prior races…</strong>}
+        {recommend.error && <strong>Recommendation unavailable: {recommend.error}</strong>}
+        {modelLines.map((line) => <strong key={line}>{line}</strong>)}
+        {holdout?.racesTest ? <em>Holdout: {holdout.racesTrain} train / {holdout.racesTest} random test races · push AUC {holdout.targets?.pushHelps?.testAuc ?? '—'} · recover AUC {holdout.targets?.recoverIfLost?.testAuc ?? '—'}</em> : null}
+      </div>}
+    </div>
+  </aside>
+}
+
 function RecordedTrack({ trackmap, frame, drivers, attacker, defender, selectedDrivers, viewMode, branchOverlay }) {
   const geometry = useMemo(() => projection(trackmap?.points), [trackmap])
   const driverByCode = useMemo(() => new Map((drivers ?? []).map((driver) => [driver.driver, driver])), [drivers])
@@ -334,8 +578,10 @@ function SelectControl({ label, value, onChange, children, disabled = false }) {
   return <label className="sim-control"><span>{label}</span><select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>{children}</select></label>
 }
 
-export function SimulationReplayView({ onOpenDashboard, onHome }) {
-  const [selection, setSelection] = useState({ year: 2026, round: 7, session: 'Race', driver: 'HAM', lap: 1 })
+export function SimulationReplayView({ onOpenDashboard, onHome, initialRequest, onRequestConsumed }) {
+  const [selection, setSelection] = useState(() => selectionFromRequest(initialRequest))
+  const [incomingWhatIf, setIncomingWhatIf] = useState(initialRequest || null)
+  const whatIfStartedRef = useRef(null)
   const [events, setEvents] = useState([])
   const [decision, setDecision] = useState({ loading: true })
   const [trackmap, setTrackmap] = useState(null)
@@ -346,6 +592,7 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
   const [speed, setSpeed] = useState(1)
   const [viewMode, setViewMode] = useState('2D')
   const [displayMode, setDisplayMode] = useState('OBSERVED')
+  const [batteryClip, setBatteryClip] = useState({ loading: true })
   const [selectedDrivers, setSelectedDrivers] = useState([])
   const [frameIndex, setFrameIndex] = useState(0)
   const [playhead, setPlayhead] = useState(0)
@@ -390,18 +637,10 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
       const roster = payload.participants ?? []
       const rows = payload.analysisRows ?? payload.rows ?? []
       let driver = roster.includes(selection.driver) ? selection.driver : roster[0]
-      // A replay can show any participant, but the initial simulation state
-      // must be a real detected pair rather than (for example) HAM paired
-      // with the defender from somebody else's Barcelona battle.
-      let firstBattle = rows.find((row) => row.driver === driver)
-      if (!firstBattle && rows.length) {
-        firstBattle = rows[0]
-        driver = firstBattle.driver
-      }
+      // Keep the selected / default driver (Australia RUS at lights-out)
+      // unless that code is not even in the session.
+      if (!roster.includes(selection.driver) && rows.length) driver = rows[0].driver
       setDecision({ data: payload })
-      // Keep the user's jump/branch lap intact. A detected battle can inform
-      // the initial pair, but it must not silently replace full-race playback
-      // with a clip beginning at that battle.
       update({ driver: driver ?? selection.driver })
     }).catch((error) => { if (live) setDecision({ error: error.message }) })
     return () => { live = false }
@@ -441,6 +680,26 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
     requestJson(`/api/f1/racereplay?year=${selection.year}&round=${selection.round}&session=${selection.session}`).then((payload) => { if (live) setReplay({ data: payload }) }).catch((error) => { if (live) setReplay({ error: error.message }) })
     return () => { live = false }
   }, [raceReplayUnavailable, selection.year, selection.round, selection.session])
+
+  useEffect(() => {
+    if (raceReplayUnavailable || !selection.driver) {
+      setBatteryClip({ idle: true })
+      return undefined
+    }
+    let live = true
+    setBatteryClip({ loading: true })
+    fetchBatteryClip({
+      year: selection.year,
+      round: selection.round,
+      session: selection.session,
+      driver: selection.driver,
+      startSocMj: 4,
+    }).then((data) => {
+      if (!live) return
+      setBatteryClip(data?.error ? { error: data.error } : { data })
+    }).catch((error) => { if (live) setBatteryClip({ error: error.message }) })
+    return () => { live = false }
+  }, [raceReplayUnavailable, selection.year, selection.round, selection.session, selection.driver])
 
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => {
@@ -568,25 +827,99 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
     setPlaying(false)
     update({ lap })
   }
-  const startPitwolfBranch = () => {
+  const startPitwolfBranch = (opts = {}) => {
+    const forcedFirstAction = mapForcedAction(opts.forcedFirstAction)
+    const preferredOpponent = opts.preferredOpponent
+    const whatIf = opts.whatIf
     jumpToLap(selection.lap)
     setDisplayMode('BRANCH')
-    if (!battle || !modelOpponent || !branchFocus) {
+    let role = branchRole
+    let opponent = modelOpponent
+    let focus = branchFocus
+    let predictionRow = battle
+    if (preferredOpponent) {
+      const attackRow = rows.find((row) => row.driver === selection.driver && row.defender === preferredOpponent && Number(row.lap) === Number(selection.lap))
+      const defendRow = rows.find((row) => row.driver === preferredOpponent && row.defender === selection.driver && Number(row.lap) === Number(selection.lap))
+      if (attackRow) {
+        role = 'ATTACKING'
+        opponent = preferredOpponent
+        focus = { ...attackRow, selectedRole: 'ATTACKING', sourcePerspective: 'OBSERVED_SELECTED_ATTACK' }
+        predictionRow = attackRow
+      } else if (defendRow) {
+        role = 'DEFENDING'
+        opponent = preferredOpponent
+        focus = {
+          ...defendRow,
+          driver: selection.driver,
+          defender: preferredOpponent,
+          position: defendRow.defenderPosition,
+          defenderPosition: defendRow.position,
+          selectedRole: 'DEFENDING',
+          sourcePerspective: 'OBSERVED_OPPONENT_ATTACK',
+        }
+        predictionRow = defendRow
+      } else {
+        const us = branchRaceOrder.find((row) => row.driver === selection.driver)
+        const them = branchRaceOrder.find((row) => row.driver === preferredOpponent)
+        role = whatIf?.kind === 'DEFEND' ? 'DEFENDING' : 'ATTACKING'
+        opponent = preferredOpponent
+        focus = {
+          year: selection.year,
+          round: selection.round,
+          session: selection.session,
+          lap: selection.lap,
+          driver: selection.driver,
+          defender: preferredOpponent,
+          position: us?.timingPosition ?? whatIf?.position,
+          defenderPosition: them?.timingPosition,
+          gapS: (role === 'DEFENDING' ? whatIf?.gapToBehindS : whatIf?.gapToAheadS) ?? 0.8,
+          closingRateS: 0,
+          lapFraction: selection.lap / Math.max(1, totalLaps),
+          selectedRole: role,
+          sourcePerspective: 'INCIDENT_WHAT_IF',
+          pitDistorted: false,
+        }
+        predictionRow = focus
+      }
+    }
+    if (!opponent || !focus) {
       setBranchRequest(null)
       setBranch({ error: 'No extracted close battle exists for this driver and recorded lap. PitWolf needs one real public two-car state to start a branch.' })
       return
     }
+    if (whatIf?.driver && whatIf?.otherDriver) {
+      setSelectedDrivers([whatIf.driver, whatIf.otherDriver].filter((code, index, list) => code && list.indexOf(code) === index).slice(0, MAX_VISUAL_SELECTIONS))
+    }
     setBranchRequest({
-      id: `${Date.now()}:${selection.year}:${selection.round}:${selection.session}:${selection.driver}:${modelOpponent}:${branchRole}:${selection.lap}`,
+      id: `${Date.now()}:${selection.year}:${selection.round}:${selection.session}:${selection.driver}:${opponent}:${role}:${selection.lap}:${forcedFirstAction || 'policy'}`,
       year: selection.year,
       round: selection.round,
       session: selection.session,
       driver: selection.driver,
-      defender: modelOpponent,
+      defender: opponent,
       lap: selection.lap,
-      role: branchRole,
-      focus: branchFocus,
-      predictionRow: battle,
+      role,
+      focus,
+      predictionRow,
+      forcedFirstAction,
+      whatIf: whatIf ? {
+        call: mapForcedAction(whatIf.call) || forcedFirstAction,
+        kind: whatIf.kind,
+        problem: whatIf.problem,
+        theyDid: whatIf.theyDid,
+        otherDriver: whatIf.otherDriver,
+        leftPct: whatIf.leftPct,
+        gapToAheadS: whatIf.gapToAheadS,
+        gapToBehindS: whatIf.gapToBehindS,
+        position: whatIf.position,
+        observedFinish: whatIf.observedFinish,
+        raceEnd: whatIf.raceEnd,
+        takes: whatIf.takes,
+        keyTake: whatIf.keyTake,
+        opponent: whatIf.opponent,
+        netPass: whatIf.netPass,
+        pPass: whatIf.pPass,
+      } : null,
       totalLaps: decision.data?.totalLaps ?? totalLaps,
       finishPositions: decision.data?.finishPositions ?? {},
       ruleContext: decision.data?.ruleContext,
@@ -602,11 +935,44 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
   }, [selection.driver, replay.data])
 
   useEffect(() => {
+    if (!initialRequest) return
+    setIncomingWhatIf(initialRequest)
+    setSelection(selectionFromRequest(initialRequest))
+    setDisplayMode('BRANCH')
+    setSelectedDrivers([initialRequest.driver, initialRequest.otherDriver].filter(Boolean).slice(0, MAX_VISUAL_SELECTIONS))
+    whatIfStartedRef.current = null
+  }, [initialRequest])
+
+  useEffect(() => {
+    const request = incomingWhatIf
+    if (!request || whatIfStartedRef.current === request) return
+    if (!replay.data?.frames?.length || !decision.data) return
+    if (Number(selection.year) !== Number(request.year) || Number(selection.round) !== Number(request.round)) return
+    if (selection.driver !== request.driver) return
+    const lap = Number(request.lap)
+    if (availableLaps.length && !availableLaps.includes(lap)) return
+    if (Number(selection.lap) !== lap) {
+      jumpToLap(lap)
+      return
+    }
+    whatIfStartedRef.current = request
+    startPitwolfBranch({
+      forcedFirstAction: request.call,
+      preferredOpponent: request.otherDriver,
+      whatIf: request,
+    })
+    setSpeed(2)
+    onRequestConsumed?.()
+  // Auto-start only after the recorded race for this request has loaded.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomingWhatIf, replay.data, decision.data, selection.year, selection.round, selection.driver, selection.lap, availableLaps])
+
+  useEffect(() => {
     if (!branchRequest) return undefined
     let live = true
     const ruleKey = branchRequest.ruleContext?.eventKey ?? branchRequest.ruleContext?.status ?? 'no-rule-context'
     const pairKey = `${branchRequest.year}:${branchRequest.round}:${branchRequest.session}:${branchRequest.driver}:${branchRequest.defender}:${branchRequest.role}:${ruleKey}`
-    const branchKey = `${pairKey}:${branchRequest.lap}:race-to-flag`
+    const branchKey = `${pairKey}:${branchRequest.lap}:race-to-flag:${branchRequest.forcedFirstAction || 'policy'}`
     const cachedBranch = branchCacheRef.current.get(branchKey)
     if (cachedBranch) {
       setBranch({ data: cachedBranch })
@@ -615,6 +981,9 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
     }
     const focusRow = branchRequest.focus
     const predictionRow = branchRequest.predictionRow ?? focusRow
+    const leftoverSoc = branchRequest.whatIf
+      ? Math.max(0, Math.min(4, ((Number(branchRequest.whatIf.leftPct) || 70) / 100) * 4))
+      : null
     setBranch({ loading: true })
     Promise.all([
       predictionCacheRef.current.get(pairKey)
@@ -622,15 +991,21 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
         : postJson('/api/f1/overtake/predict', { rows: [predictionRow], ruleContext: branchRequest.ruleContext }).then((payload) => {
           predictionCacheRef.current.set(pairKey, payload)
           return payload
-        }),
-      fetchEnergyLap(branchRequest.year, branchRequest.round, branchRequest.session, branchRequest.driver, branchRequest.lap),
-      fetchEnergyLap(branchRequest.year, branchRequest.round, branchRequest.session, branchRequest.defender, branchRequest.lap),
+        }).catch(() => ({ predictions: [dummyWhatIfPred(branchRequest.forcedFirstAction)] })),
+      leftoverSoc != null
+        ? Promise.resolve({ summary: { socStartMj: leftoverSoc } })
+        : fetchEnergyLap(branchRequest.year, branchRequest.round, branchRequest.session, branchRequest.driver, branchRequest.lap).catch(() => null),
+      leftoverSoc != null
+        ? Promise.resolve({ summary: { socStartMj: leftoverSoc } })
+        : fetchEnergyLap(branchRequest.year, branchRequest.round, branchRequest.session, branchRequest.defender, branchRequest.lap).catch(() => null),
     ]).then(([prediction, attackerEnergy, defenderEnergy]) => {
-      const focus = { ...focusRow, pred: prediction.predictions?.[0] }
+      const focus = { ...focusRow, pred: prediction.predictions?.[0] || dummyWhatIfPred(branchRequest.forcedFirstAction) }
       if (!focus.pred) throw new Error('The selected battle could not be scored for this exact lap.')
       return postJson('/api/f1/replay/strategy', {
         focus,
         mode: 'FUTURE_BLIND_RACE_ROLLOUT',
+        forcedFirstAction: branchRequest.forcedFirstAction,
+        whatIf: branchRequest.whatIf,
         rows: [],
         totalLaps: branchRequest.totalLaps,
         finishPositions: branchRequest.finishPositions,
@@ -719,7 +1094,7 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
       <AutoRoleControl label="ATTACKING" driver={attackingDriver} info={infoByDriver} emptyLabel={selectedDriverRow ? 'NONE — LEADING' : 'LOADING…'} />
       <AutoRoleControl label="DEFENDING" driver={defendingDriver} info={infoByDriver} emptyLabel={selectedDriverRow ? 'NONE — LAST' : 'LOADING…'} />
       <label className="sim-lap-control"><span>JUMP / BRANCH LAP</span><select value={selection.lap} onChange={(event) => update({ lap: Number(event.target.value) })}>{availableLaps.map((lap) => <option key={lap} value={lap}>Lap {lap}</option>)}</select><b>SELECT L{selection.lap} / {totalLaps}</b></label>
-      <div className="sim-jump-control"><span>FUTURE-BLIND BRANCH</span><button type="button" onClick={startPitwolfBranch}>JUMP</button><b>{battle ? `${branchRole} · L${selection.lap} → FLAG` : 'NEEDS DETECTED BATTLE'}</b></div>
+      <div className="sim-jump-control"><span>WHAT-IF BRANCH</span><button type="button" onClick={startPitwolfBranch}>JUMP</button><b>{battle ? `${branchRole} · L${selection.lap} → FLAG` : 'NEEDS A CLOSE CAR'}</b></div>
     </section>
     <section className="sim-content">
       <aside className="sim-driver-rail">
@@ -744,16 +1119,17 @@ export function SimulationReplayView({ onOpenDashboard, onHome }) {
         <div className="sim-panel-head"><span>{(event?.name ?? replay.data?.event?.name ?? 'LOADING RACE').toUpperCase()} / TRACK VISUALIZATION</span><span className="sim-track-modes"><span className="sim-branch-mode" role="group" aria-label="Replay mode"><button type="button" className={displayMode === 'OBSERVED' ? 'active' : ''} aria-pressed={displayMode === 'OBSERVED'} onClick={() => setDisplayMode('OBSERVED')}>OBSERVED</button><button type="button" className={displayMode === 'BRANCH' ? 'active' : ''} aria-pressed={displayMode === 'BRANCH'} onClick={() => setDisplayMode('BRANCH')}>PITWOLF BRANCH</button></span><span className="sim-view-toggle" role="group" aria-label="Track visualisation mode"><button type="button" className={viewMode === '2D' ? 'active' : ''} aria-pressed={viewMode === '2D'} onClick={() => setViewMode('2D')}>2D</button><button type="button" className={viewMode === '3D' ? 'active' : ''} aria-pressed={viewMode === '3D'} onClick={() => setViewMode('3D')}>3D</button></span></span></div>
         <div className="sim-status-row"><b>LAP {playbackLap?.lap ?? selection.lap} / {totalLaps}</b><span>{raceTime == null ? 'LOADING SESSION TIME…' : `RACE T+${clock(raceTime)}`}</span><i>{playbackLap?.compound ?? '—'} · {playbackLap?.trackStatus === '1' ? 'GREEN' : 'TRACK STATUS UNCONFIRMED'}</i></div>
         {raceControl && <div className={`sim-race-control is-${raceControl.tone}`}>{raceControl.label}</div>}
-        {displayMode === 'BRANCH' && (branchOverlay ? <div className="sim-branch-banner"><b>PITWOLF RACE BRANCH · L{branchOverlay.lap} → FLAG</b><span>{branchOverlay.role} · {branchOverlay.action} · {Math.round(branchOverlay.probability * 100)}% {branchOverlay.role === 'DEFENDING' ? 'opponent pass-threat signal' : 'immediate pass signal'} · {Math.round(branchOverlay.aheadProbability * 100)}% position-ahead estimate</span><em>FUTURE-BLIND TWO-CAR MODEL OVER RECORDED GHOSTS · ANALYSIS ONLY</em></div> : <div className="sim-branch-banner is-pending"><b>PITWOLF RACE BRANCH</b><span>{activeBranch.loading ? 'SCORING THE FUTURE-BLIND RACE-TO-FLAG ROLLOUT…' : activeBranch.error ? `BRANCH UNAVAILABLE · ${activeBranch.error}` : branchMatchesSelection ? 'PREPARING THE MODELLED RACE-TO-FLAG BRANCH…' : 'SELECT A LAP, THEN PRESS JUMP TO CREATE A BRANCH'}</span><em>RECORDED REPLAY REMAINS VISIBLE · THE MODEL RECEIVES ONLY THE SELECTED START STATE</em></div>)}
-        <div className="sim-track-wrap">{replay.loading || !trackmap ? <div className="sim-loading">LOADING RECORDED POSITION WINDOW…</div> : replay.error || trackmap.error ? <div className="sim-error">Recorded replay unavailable: {replay.error ?? trackmap.error}</div> : <><RecordedTrack trackmap={trackmap} frame={currentFrame} drivers={replay.data?.drivers} attacker={selection.driver} defender={modelOpponent} selectedDrivers={selectedDrivers} viewMode={viewMode} branchOverlay={branchOverlay} /><GapLeaderboard rows={gapRows} drivers={replay.data?.drivers} /></>}</div>
+        {displayMode === 'BRANCH' && (branchOverlay ? <div className="sim-branch-banner"><b>{branchRequest?.whatIf ? `WHAT IF ${branchRequest.whatIf.call || branchOverlay.action} · ${branchRequest.whatIf.observedFinish != null ? `P${branchRequest.whatIf.observedFinish}` : ''} → ${branchRequest.whatIf.raceEnd != null ? `P${branchRequest.whatIf.raceEnd}` : 'FLAG'}` : `PITWOLF BRANCH · L${branchOverlay.lap} → FLAG`}</b><span>{branchRequest?.whatIf?.keyTake ? `Important later lap: L${branchRequest.whatIf.keyTake.lap} vs ${branchRequest.whatIf.keyTake.ahead}` : `${branchOverlay.action} this lap`}{branchRequest?.whatIf?.opponent ? ` · ${branchRequest.whatIf.opponent.driver} holds ${Math.round((branchRequest.whatIf.opponent.pHold ?? 0) * 100)}%` : ''} · {Math.round((branchRequest?.whatIf?.netPass ?? branchOverlay.probability) * 100)}% net pass this fight</span><em>{branchRequest?.whatIf?.problem || 'Cars stay on the recorded GPS; the numbers are the what-if finish and later takes.'}</em></div> : <div className="sim-branch-banner is-pending"><b>{incomingWhatIf ? `WHAT IF ${incomingWhatIf.call || 'CALL'} · LOADING` : 'PITWOLF BRANCH'}</b><span>{activeBranch.loading ? 'Freezing this lap, then running the energy call to the flag…' : activeBranch.error ? `Branch unavailable — ${activeBranch.error}` : branchMatchesSelection ? 'Building the two-car energy branch…' : incomingWhatIf ? 'Loading the recorded race, then starting that what-if call…' : 'Pick a lap with a close car, then press JUMP.'}</span><em>The real replay stays on the map; the model only sees this lap’s public state.</em></div>)}
+        <div className="sim-track-wrap">{replay.loading || !trackmap ? <div className="sim-loading">Loading the recorded GPS lap…</div> : replay.error || trackmap.error ? <div className="sim-error">Recorded replay unavailable: {replay.error ?? trackmap.error}</div> : <><RecordedTrack trackmap={trackmap} frame={currentFrame} drivers={replay.data?.drivers} attacker={selection.driver} defender={modelOpponent} selectedDrivers={selectedDrivers} viewMode={viewMode} branchOverlay={branchOverlay} /><GapLeaderboard rows={gapRows} drivers={replay.data?.drivers} /></>}</div>
+        <RaceFieldHud field={batteryClip.data?.field} driver={selection.driver} playbackLap={playbackLap} playhead={playhead} loading={batteryClip.loading} error={batteryClip.error} event={batteryClip.data?.actualRace?.event} />
         <div className="sim-player"><button type="button" onClick={() => setPlaying((value) => !value)} disabled={!frames.length}>{playing ? 'Ⅱ PAUSE' : '▷ PLAY FULL RACE'}</button><button type="button" onClick={restart} disabled={!frames.length}>↻ RESTART</button><input aria-label="Replay frame" type="range" min="0" max={Math.max(0, frames.length - 1)} value={frameIndex} onChange={(event) => { const index = Number(event.target.value); const time = frames[index]?.t ?? 0; cursorRef.current = time; setFrameIndex(index); setPlayhead(time); setPlaying(false) }} /><span className="sim-playback-lap">PLAYING L{playbackLap?.lap ?? '—'} · {branchMatchesSelection ? `BRANCH L${branchStartLap} → FLAG` : 'NO BRANCH'}</span><div className="sim-speeds">{SPEEDS.map((value) => <button key={value} type="button" className={speed === value ? 'active' : ''} onClick={() => setSpeed(value)}>{value}×</button>)}</div></div>
       </section>
       <aside className="sim-side">
         <RaceOrderBoard rows={raceOrder} />
-        <section className="sim-card"><div className="sim-panel-head"><span>SELECTED DRIVER STATE</span><em>RECORDED INPUT · L{selection.lap}</em></div><div className="sim-pair"><div><span>DRIVER</span><b>{selection.driver}</b><em>{selectedDriverRow ? `P${selectedDriverRow.timingPosition}` : '—'}</em></div><div><span>ATTACKING</span><b>{attackingDriver ?? 'NONE'}</b><em>{attackingDriver ? `P${branchRaceOrder.find((row) => row.driver === attackingDriver)?.timingPosition ?? '—'}` : 'LEADING'}</em></div></div><div className="sim-facts"><span>DEFENDING AGAINST <b>{defendingDriver ?? 'NONE — LAST'}</b></span>{battle ? <><span>MODEL ROLE <b>{branchRole}</b></span><span>RELATIVE SPEED <b>{battle.speedDeltaKph == null ? '—' : `${battle.speedDeltaKph > 0 ? '+' : ''}${battle.speedDeltaKph} km/h`}</b></span><span>TYRES <b>{battle.attackerCompound ?? '—'} / {battle.defenderCompound ?? '—'}</b></span><span>MODEL STATE <b>{activeBranch.loading ? 'SCORING' : branchTree ? 'MODELLED BRANCH READY' : activeBranch.error ? 'UNAVAILABLE' : 'AWAITING JUMP'}</b></span></> : <span>MODEL STATE <b>{attackingDriver || defendingDriver ? 'NO DETECTED BATTLE AT THIS LAP' : 'NO ADJACENT CAR'}</b></span>}</div>{!battle && <p className="sim-note">The relationship is automatic from the recorded classification at the selected branch lap. A branch can begin from either an extracted attack on the car ahead or an extracted defence against the car behind.</p>}</section>
-        <section className="sim-card sim-branch"><div className="sim-panel-head"><span>PITWOLF RACE BRANCH</span><em>{branchTree ? `L${branchTree.startLap} → L${branchTree.finishLap}` : 'AWAITING JUMP'}</em></div>{activeBranch.loading ? <p className="sim-note">Freezing the selected public state, then rolling PitWolf’s energy and overtake policy forward to the flag without later recorded inputs…</p> : activeBranch.error ? <p className="sim-note sim-error">Modelled branch unavailable: {activeBranch.error}</p> : branchTree && branchStep && actionProbabilities ? <><div className="sim-action"><b>{branchStep.action}</b><span>FIRST FUTURE-BLIND POLICY ACTION</span><em>{Math.round((actionProbabilities[branchStep.action] ?? 0) * 100)}% START-STATE ACTION-MODEL SIGNAL</em></div><div className="sim-probabilities">{['ATTACK', 'DELAY', 'SAVE'].map((action) => <span key={action}><i className={`sim-prob-${action.toLowerCase()}`} style={{ width: `${Math.round((actionProbabilities[action] ?? 0) * 100)}%` }} />{action} <b>{Math.round((actionProbabilities[action] ?? 0) * 100)}%</b></span>)}</div><div className="sim-facts"><span>MODEL ROLE AT JUMP <b>{branchTree.selectedRoleAtJump ?? branchRequest?.role ?? '—'}</b></span><span>MODELLED SoC AT JUMP <b>{branchTree.tree.ourSoc.toFixed(2)} / {branchTree.tree.defenderSoc.toFixed(2)} MJ</b></span><span>AFTER FIRST ACTION <b>{branchStep.ourSoc.toFixed(2)} / {branchStep.defenderSoc.toFixed(2)} MJ</b></span><span>PAIR-AHEAD ESTIMATE AT FLAG <b>{Math.round((branchTree.modelledPairAheadProbabilityAtFlag ?? branchTree.path.at(-1)?.aheadProbability ?? 0) * 100)}%</b></span><span>OPPONENT RESPONSE <b>{branchStep.opponentAction}</b></span></div><ol className="sim-branch-log">{(branchTree.actionChanges?.length ? branchTree.actionChanges : branchTree.path).slice(0, 12).map((step, index) => <li key={`${step.lap}-${index}`}><b>L{step.lap}</b><span>{step.action}{step.opponentAction ? ` · opponent ${step.opponentAction}` : ' · policy change'}</span><em>{step.aheadProbability == null ? 'ROLLOUT' : `${Math.round(step.aheadProbability * 100)}% ahead · ${step.ourSoc.toFixed(2)} MJ`}</em></li>)}</ol><p className="sim-note">The rollout receives only the public state at JUMP. It evolves the selected driver and their real recorded opponent in either an attacking or defensive role; it does not read later race rows or claim a full-grid counterfactual.</p></> : <p className="sim-note">Choose a recorded lap, then press JUMP to start a future-blind race-to-flag branch.</p>}</section>
-        {branchTree && <section className="sim-card sim-comparison"><div className="sim-panel-head"><span>OBSERVED / MODELLED FLAG COMPARISON</span><em>TWO-CAR ONLY</em></div><div className="sim-facts"><span>MODELLED PAIR ORDER AT FLAG <b>{branchTree.modelledPairAheadAtFlag ? 'SELECTED DRIVER AHEAD' : 'SELECTED DRIVER BEHIND'}</b></span><span>MODELLED PAIR-AHEAD ESTIMATE <b>{Math.round((branchTree.modelledPairAheadProbabilityAtFlag ?? 0) * 100)}%</b></span><span>OBSERVED PAIR ORDER AT FLAG <b>{branchTree.actualPairAheadAtFlag ? 'SELECTED DRIVER AHEAD' : 'SELECTED DRIVER BEHIND'}</b></span><span>REAL SELECTED FINISH <b>{branchTree.actualFinishPosition ? `P${branchTree.actualFinishPosition}` : 'NOT CLASSIFIED'}</b></span><span>MODELLED ENERGY WINDOW <b>{branchSocWithinWindow ? `WITHIN 0–${branchSocCapacity.toFixed(0)} MJ` : 'OUTSIDE MODEL WINDOW'}</b></span><span>FIA COMMAND GATE <b>{commandGate ?? 'ANALYSIS ONLY'}</b></span></div><p className="sim-note">{branchTree.finishComparison?.pairOrderMatchesObserved ? 'The modelled pair order matches the recorded flag order.' : 'The modelled pair order differs from the recorded flag order.'} A better/worse/same full-race finishing position is intentionally not claimed: the branch does not yet model the rest of the grid, BOX decisions, tyre evolution, traffic, retirements, or later race-control events.</p></section>}
-        <section className="sim-card"><div className="sim-panel-head"><span>TRACK MARKERS</span><em>PROVENANCE</em></div><div className="sim-facts"><span>CARS ON MAP <b>{currentFrame?.cars?.length ?? 0}</b></span><span>CIRCUIT SOURCE <b>PUBLIC GPS / TELEMETRY</b></span><span>CORNER SOURCE <b>{trackmap?.cornerSource?.includes('fastf1-circuit-info') ? 'NUMBERED CIRCUIT DATA' : trackmap?.cornerSource ? 'FALLBACK CIRCUIT DATA' : 'NOT LOADED'}</b></span><span>TURN / ZONE OVERLAY <b>{visualOverlay?.source === 'USER_VISUAL_TURN_REFERENCE' ? 'VISUAL REFERENCE' : 'NOT LOADED'}</b></span><span>ZONE COMMAND GATE <b>ANALYSIS ONLY</b></span></div><p className="sim-note">Corner labels use the numbered circuit sequence, projected onto the recorded telemetry map. Straight Mode and DET/ACT marks use the supplied turn-range reference only; they are not FIA distance-aligned command lines.</p></section>
+        <section className="sim-card"><div className="sim-panel-head"><span>SELECTED DRIVER STATE</span><em>RECORDED INPUT · L{selection.lap}</em></div><div className="sim-pair"><div><span>DRIVER</span><b>{selection.driver}</b><em>{selectedDriverRow ? `P${selectedDriverRow.timingPosition}` : '—'}</em></div><div><span>ATTACKING</span><b>{attackingDriver ?? 'NONE'}</b><em>{attackingDriver ? `P${branchRaceOrder.find((row) => row.driver === attackingDriver)?.timingPosition ?? '—'}` : 'LEADING'}</em></div></div><div className="sim-facts"><span>DEFENDING AGAINST <b>{defendingDriver ?? 'NONE — LAST'}</b></span>{battle ? <><span>MODEL ROLE <b>{branchRole}</b></span><span>RELATIVE SPEED <b>{battle.speedDeltaKph == null ? '—' : `${battle.speedDeltaKph > 0 ? '+' : ''}${battle.speedDeltaKph} km/h`}</b></span><span>TYRES <b>{battle.attackerCompound ?? '—'} / {battle.defenderCompound ?? '—'}</b></span><span>MODEL STATE <b>{activeBranch.loading ? 'SCORING' : branchTree ? 'MODELLED BRANCH READY' : activeBranch.error ? 'UNAVAILABLE' : 'AWAITING JUMP'}</b></span></> : <span>MODEL STATE <b>{attackingDriver || defendingDriver ? 'NO DETECTED BATTLE AT THIS LAP' : 'NO ADJACENT CAR'}</b></span>}</div>{!battle && <p className="sim-note">The car ahead and behind come from the real running order at this lap; JUMP needs one of those close battles.</p>}</section>
+        <section className="sim-card sim-branch"><div className="sim-panel-head"><span>PITWOLF RACE BRANCH</span><em>{branchTree ? `L${branchTree.startLap} → L${branchTree.finishLap}` : 'AWAITING JUMP'}</em></div>{activeBranch.loading ? <p className="sim-note">Freeze this lap’s gap and energy, then decide each later lap without reading the rest of the race.</p> : activeBranch.error ? <p className="sim-note sim-error">This branch could not be scored: {activeBranch.error}</p> : branchTree && branchStep && actionProbabilities ? <><div className="sim-action"><b>{branchStep.action}</b><span>{branchStep.forced || branchRequest?.forcedFirstAction ? 'FORCED FIRST LAP' : 'MODEL FIRST LAP'}</span><em>{branchRequest?.whatIf ? `They spent ${branchRequest.whatIf.theyDid || '—'}; the branch now spends ${branchStep.action} on this lap` : `${Math.round((actionProbabilities[branchStep.action] ?? 0) * 100)}% model confidence for this first action`}</em></div><div className="sim-probabilities">{['ATTACK', 'DELAY', 'SAVE'].map((action) => <span key={action}><i className={`sim-prob-${action.toLowerCase()}`} style={{ width: `${Math.round((actionProbabilities[action] ?? 0) * 100)}%` }} />{action} <b>{Math.round((actionProbabilities[action] ?? 0) * 100)}%</b></span>)}</div><div className="sim-facts"><span>MODEL ROLE AT JUMP <b>{branchTree.selectedRoleAtJump ?? branchRequest?.role ?? '—'}</b></span><span>MODELLED SoC AT JUMP <b>{branchTree.tree.ourSoc.toFixed(2)} / {branchTree.tree.defenderSoc.toFixed(2)} MJ</b></span><span>AFTER FIRST ACTION <b>{branchStep.ourSoc.toFixed(2)} / {branchStep.defenderSoc.toFixed(2)} MJ</b></span><span>CHANCE THEY STAY AHEAD AT FLAG <b>{Math.round((branchTree.modelledPairAheadProbabilityAtFlag ?? branchTree.path.at(-1)?.aheadProbability ?? 0) * 100)}%</b></span><span>OPPONENT RESPONSE <b>{branchStep.opponentAction}</b></span></div><ol className="sim-branch-log">{(branchTree.actionChanges?.length ? branchTree.actionChanges : branchTree.path).slice(0, 12).map((step, index) => <li key={`${step.lap}-${index}`}><b>L{step.lap}</b><span>{step.action}{step.opponentAction ? ` · opponent ${step.opponentAction}` : ' · policy change'}</span><em>{step.aheadProbability == null ? 'ROLLOUT' : `${Math.round(step.aheadProbability * 100)}% ahead · ${step.ourSoc.toFixed(2)} MJ`}</em></li>)}</ol>{branchRequest?.whatIf?.takes?.length ? <ol className="sim-branch-log">{branchRequest.whatIf.takes.map((item, index) => <li key={`${item.lap}-${index}`}><b>L{item.lap}</b><span>{item.note}{item.oppDid ? ` · ${item.ahead || 'ahead'} ${item.oppDid}` : ''}</span><em>{item.pPass == null ? item.kind : `${Math.round(item.pPass * 100)}% net${item.pOppHold == null ? '' : ` · they hold ${Math.round(item.pOppHold * 100)}%`}`}</em></li>)}</ol> : null}<p className="sim-note">{branchRequest?.whatIf?.raceEnd != null ? `Real finish P${branchRequest.whatIf.observedFinish ?? '—'} → what-if P${branchRequest.whatIf.raceEnd}. Cars stay on the recorded GPS; the list is the later takes.` : 'Only this pair is modelled from the JUMP freeze-frame; later timing, pits, and the rest of the grid are not replayed.'}</p></> : <p className="sim-note">Pick a recorded lap with a close car, then press JUMP to run energy and pass chance to the flag.</p>}</section>
+        {branchTree && <section className="sim-card sim-comparison"><div className="sim-panel-head"><span>REAL vs MODEL AT THE FLAG</span><em>TWO CARS ONLY</em></div><div className="sim-facts"><span>MODEL: WHO IS AHEAD <b>{branchTree.modelledPairAheadAtFlag ? 'SELECTED DRIVER AHEAD' : 'SELECTED DRIVER BEHIND'}</b></span><span>MODEL CHANCE THEY STAY AHEAD <b>{Math.round((branchTree.modelledPairAheadProbabilityAtFlag ?? 0) * 100)}%</b></span><span>REAL RACE: WHO WAS AHEAD <b>{branchTree.actualPairAheadAtFlag ? 'SELECTED DRIVER AHEAD' : 'SELECTED DRIVER BEHIND'}</b></span><span>REAL SELECTED FINISH <b>{branchTree.actualFinishPosition ? `P${branchTree.actualFinishPosition}` : 'NOT CLASSIFIED'}</b></span><span>MODELLED ENERGY WINDOW <b>{branchSocWithinWindow ? `WITHIN 0–${branchSocCapacity.toFixed(0)} MJ` : 'OUTSIDE MODEL WINDOW'}</b></span><span>FIA COMMAND GATE <b>{commandGate ?? 'ANALYSIS ONLY'}</b></span></div><p className="sim-note">{branchTree.finishComparison?.pairOrderMatchesObserved ? 'At the flag, the model keeps the same who-is-ahead as the real race for this pair.' : 'At the flag, the model swaps who is ahead of this pair versus the real race.'} That is two cars only — not a new finishing position for the whole grid.</p></section>}
+        <section className="sim-card"><div className="sim-panel-head"><span>TRACK MARKERS</span><em>PROVENANCE</em></div><div className="sim-facts"><span>CARS ON MAP <b>{currentFrame?.cars?.length ?? 0}</b></span><span>CIRCUIT SOURCE <b>PUBLIC GPS / TELEMETRY</b></span><span>CORNER SOURCE <b>{trackmap?.cornerSource?.includes('fastf1-circuit-info') ? 'NUMBERED CIRCUIT DATA' : trackmap?.cornerSource ? 'FALLBACK CIRCUIT DATA' : 'NOT LOADED'}</b></span><span>TURN / ZONE OVERLAY <b>{visualOverlay?.source === 'USER_VISUAL_TURN_REFERENCE' ? 'VISUAL REFERENCE' : 'NOT LOADED'}</b></span><span>ZONE COMMAND GATE <b>ANALYSIS ONLY</b></span></div><p className="sim-note">Corner numbers sit on the recorded GPS map; they are not official FIA detection or activation lines.</p></section>
       </aside>
     </section>
   </main>

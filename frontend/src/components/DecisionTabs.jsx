@@ -8,6 +8,8 @@ import {
   fetchStrategyReplay,
   fetchCachedRaces,
   fetchBatteryClip,
+  fetchStrategyStory,
+  fetchEnergyTrend,
   STRATEGY_COLORS,
   STRATEGY_ORDER,
 } from '../lib/f1api'
@@ -32,53 +34,95 @@ function racePosition(position) {
   return position == null ? '—' : `P${position}`
 }
 
-// These are the official lap-classification movements supplied by FastF1.
-// They deliberately are not named "overtakes": a pit cycle, retirement,
-// race-control procedure, or lap-one reorder can create the same movement.
-function RacePositionSummary({ summaries, selectedDriver }) {
-  if (!Array.isArray(summaries) || !summaries.length) return null
-  const selected = summaries.find((item) => item.driver === selectedDriver)
-  const ordered = [...summaries].sort((left, right) => {
-    const leftFinish = left.finalPosition ?? 999
-    const rightFinish = right.finalPosition ?? 999
-    return leftFinish - rightFinish || left.driver.localeCompare(right.driver)
-  })
-  const gainText = (event) => {
-    const pit = event.pitContext ? ' · PIT CONTEXT' : ''
-    const status = event.trackStatus && event.trackStatus !== '1' ? ` · TRACK ${event.trackStatus}` : ''
-    return `L${event.lap} ${racePosition(event.fromPosition)}→${racePosition(event.toPosition)} (+${event.places})${pit}${status}`
-  }
+function finishPos(value) {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `P${Math.round(Number(value))}`
+}
 
-  return <section className="ov-panel dt-race-position-panel">
+function takeLine(items) {
+  const rows = (items || []).filter(Boolean)
+  if (!rows.length) return 'no extra whole place to the flag'
+  return rows.map((item) => {
+    const hold = item.pOppHold == null ? '' : ` · ${item.ahead || 'ahead'} holds ${Math.round(Number(item.pOppHold) * 100)}%`
+    const pass = item.pPass == null ? '' : ` · net ${Math.round(Number(item.pPass) * 100)}%`
+    return `${item.note || `L${item.lap} ${item.kind === 'HOLD' ? 'hold' : 'take'} ${item.ahead || ''}`}${pass}${hold}`
+  }).join(' · ')
+}
+
+function oddsPct(value) {
+  return value == null || Number.isNaN(Number(value)) ? '—' : `${Math.round(Number(value) * 100)}%`
+}
+
+function interestingCall(model) {
+  if (!model) return 'ATTACK'
+  if (model.whatIfCall) return mapSimCall(model.whatIfCall)
+  if (model.theyDid === model.call && model.theyDid === 'ATTACK') return 'SAVE'
+  return mapSimCall(model.clips && model.call === 'ATTACK' ? 'HOLD' : model.call)
+}
+
+function StrategyRaceStory({ sel, onSelectDriver }) {
+  const [story, setStory] = useState({ loading: true })
+  useEffect(() => {
+    if (!sel?.year || !sel?.round || !sel?.driver) return undefined
+    let live = true
+    setStory({ loading: true })
+    fetchStrategyStory({ year: sel.year, round: sel.round, session: sel.session, driver: sel.driver })
+      .then((data) => { if (live) setStory(data?.error ? { error: data.error } : { data }) })
+      .catch((error) => { if (live) setStory({ error: error.message }) })
+    return () => { live = false }
+  }, [sel.year, sel.round, sel.session, sel.driver])
+
+  if (story.loading) return <section className="ov-panel dt-story-panel"><div className="lx-loading"><span className="lx-spinner" />BUILDING DRIVER RACE STORY…</div></section>
+  if (story.error) return <section className="ov-panel dt-story-panel"><p className="lx-empty">Race story unavailable. {story.error}</p></section>
+  const data = story.data
+  const selected = data?.selected
+  if (!selected) return null
+  const net = selected.netPlaces
+  const recs = data.recommendations ?? []
+  return <section className="ov-panel dt-story-panel">
     <div className="ov-panel-head">
-      <span>OBSERVED RACE POSITION SUMMARY / LAP CLASSIFICATIONS</span>
-      <Badge tone="real">TIMING DATA</Badge>
+      <span>DRIVER RACE STORY / {selected.driver} · {String(data.event?.name || '').toUpperCase()}</span>
+      <Badge tone="derived">TIMING + 2018–2025 DRS RECIPE</Badge>
     </div>
-    <p className="dt-race-position-note">Position changes are observed timing movements, not pass claims. Pit-cycle, retirement, safety-car, and lap-one effects can move a driver forward or back.</p>
-
-    {selected && <div className="dt-race-position-focus">
-      <div><span>{selected.driver} START</span><b>{racePosition(selected.gridPosition)}</b></div>
-      <div><span>FINAL CLASSIFIED</span><b>{racePosition(selected.finalPosition)}</b></div>
-      <div><span>NET PLACES</span><b className={selected.netPlacesGained > 0 ? 'positive' : selected.netPlacesGained < 0 ? 'negative' : ''}>{selected.netPlacesGained == null ? '—' : `${selected.netPlacesGained > 0 ? '+' : ''}${selected.netPlacesGained}`}</b></div>
-      <div><span>POSITION-GAIN PLACES</span><b>{selected.positionGainCount ?? 0}</b></div>
+    <p className="dt-race-position-note">Start is first timed-lap running order. Finish is the classified result. Extra places are modelled from missed 1.0s windows times this driver’s historical DRS efficiency — not a claim they would have finished there.</p>
+    <div className="dt-race-position-focus">
+      <div><span>{selected.driver} STARTED</span><b>{racePosition(selected.startPosition)}</b></div>
+      <div><span>FINISHED</span><b>{racePosition(selected.finishPosition)}</b></div>
+      <div><span>NET PLACES</span><b className={net > 0 ? 'positive' : net < 0 ? 'negative' : ''}>{net == null ? '—' : `${net > 0 ? '+' : ''}${net}`}</b></div>
+      <div><span>OBSERVED TAKES</span><b>{selected.overtakes ?? 0}</b></div>
+    </div>
+    <div className="dt-story-focus">
+      <div><span>DRS WINDOWS</span><b>{selected.drsConverted}/{selected.drsWindows}</b><em>converted / seen</em></div>
+      <div><span>EFFICIENCY</span><b>{selected.efficiency == null ? '—' : Number(selected.efficiency).toFixed(2)}</b><em>0–1 from 2018–2025</em></div>
+      <div><span>MISSED WINDOWS</span><b>{selected.drsMissed}</b><em>expected extra {selected.expectedExtraPlaces ?? 0}</em></div>
+      <div><span>COULD FINISH</span><b className={selected.couldFinishBetter ? 'positive' : ''}>{selected.couldFinishBetter ? racePosition(selected.potentialFinish) : 'NO LIFT'}</b><em>{selected.couldFinishBetter ? `from P${selected.finishPosition} if missed DRS converted at their rate` : 'historical rate does not move the classified result'}</em></div>
+    </div>
+    {selected.changes?.length ? <div className="dt-race-position-events">
+      <span>{selected.driver} PLACE CHANGES</span>
+      <div>{selected.changes.map((event, index) => <b key={`${event.lap}-${index}`}>L{event.lap} {racePosition(event.fromPosition)}→{racePosition(event.toPosition)} ({event.places > 0 ? '+' : ''}{event.places}{event.ahead ? ` vs ${event.ahead}` : ''}{event.pit ? ' · PIT' : ''})</b>)}</div>
+    </div> : <p className="ov-notes">No timing place change recorded for {selected.driver}.</p>}
+    {selected.missedWindows?.length > 0 && <div className="dt-story-windows">
+      <span>MISSED DRS WINDOWS · HOW A TAKE COULD HAVE HAPPENED</span>
+      {selected.missedWindows.map((item) => <em key={`${item.startLap}-${item.ahead}`}>L{item.startLap} on {item.ahead} · held {item.waitLaps} laps · typical convert wait {selected.typicalWaitLaps ?? '—'} laps at efficiency {selected.efficiency}</em>)}
     </div>}
-
-    {selected && <div className="dt-race-position-events">
-      <span>{selected.driver} GAIN LAPS</span>
-      {selected.positionGainEvents?.length
-        ? <div>{selected.positionGainEvents.map((event, index) => <b key={`${event.lap}-${index}`}>{gainText(event)}</b>)}</div>
-        : <em>No forward lap-classification movement recorded.</em>}
-    </div>}
-
-    <div className="dt-race-position-head"><span>DRIVER</span><span>START</span><span>FINAL</span><span>NET</span><span>GAIN LAPS / OBSERVED CLASSIFICATION MOVEMENT</span></div>
+    {recs.map((item, index) => <div className="dt-story-rec" key={`${item.driver}-${item.lap}-${index}`}>
+      <b>L{item.lap ?? '—'} RECIPE · {item.action}</b>
+      {(item.lines ?? []).slice(0, 4).map((line) => <strong key={line}>{line}</strong>)}
+    </div>)}
+    <div className="dt-race-position-head"><span>DRIVER</span><span>START</span><span>FINAL</span><span>NET</span><span>DRS / RECIPE</span></div>
     <div className="dt-race-position-list">
-      {ordered.map((item) => <div className={`dt-race-position-row ${item.driver === selectedDriver ? 'selected' : ''}`} key={item.driver}>
+      {(data.drivers ?? []).map((item) => <button
+        type="button"
+        className={`dt-race-position-row dt-story-row ${item.driver === selected.driver ? 'selected' : ''}`}
+        key={item.driver}
+        onClick={() => onSelectDriver?.(item.driver)}
+      >
         <b>{item.driver}</b>
-        <span>{racePosition(item.gridPosition)}</span>
-        <span>{racePosition(item.finalPosition)}</span>
-        <span className={item.netPlacesGained > 0 ? 'positive' : item.netPlacesGained < 0 ? 'negative' : ''}>{item.netPlacesGained == null ? '—' : `${item.netPlacesGained > 0 ? '+' : ''}${item.netPlacesGained}`}</span>
-        <em>{item.positionGainEvents?.length ? item.positionGainEvents.map(gainText).join(' · ') : '—'}</em>
-      </div>)}
+        <span>{racePosition(item.startPosition)}</span>
+        <span>{racePosition(item.finishPosition)}</span>
+        <span className={item.netPlaces > 0 ? 'positive' : item.netPlaces < 0 ? 'negative' : ''}>{item.netPlaces == null ? '—' : `${item.netPlaces > 0 ? '+' : ''}${item.netPlaces}`}</span>
+        <em>{item.drsConverted}/{item.drsWindows} DRS · eff {item.efficiency ?? '—'}{item.couldFinishBetter ? ` · could P${item.potentialFinish}` : ''}</em>
+      </button>)}
     </div>
   </section>
 }
@@ -235,6 +279,154 @@ export function RaceSelector({ sel, onChange, drivers, events }) {
   </div>
 }
 
+const INCIDENT_TONE = {
+  MISS_ATTACK: 'ATTACK CHANCE',
+  DEFEND: 'DEFEND',
+  TOOK: 'OBSERVED TAKE',
+  SAVE_CHANCE: 'SAVE BATTERY',
+}
+
+function sessionNameOf(sel) {
+  if (!sel?.session || sel.session === 'R') return 'Race'
+  if (sel.session === 'Q') return 'Qualifying'
+  if (sel.session === 'S') return 'Sprint'
+  return sel.session
+}
+
+function mapSimCall(call) {
+  if (call === 'ATTACK' || call === 'SAVE') return call
+  return 'HOLD'
+}
+
+function buildWhatIfRequest(sel, focus, call) {
+  const model = focus?.model
+  const chosen = mapSimCall(call || interestingCall(model))
+  return {
+    year: sel.year,
+    round: sel.round,
+    session: sessionNameOf(sel),
+    driver: sel.driver,
+    lap: focus.lap,
+    otherDriver: focus.otherDriver,
+    call: chosen,
+    kind: focus.kind,
+    problem: model?.resultIf || focus.problem,
+    theyDid: model?.theyDid || focus.live?.action,
+    position: focus.live?.position,
+    gapToAheadS: focus.live?.gapToAheadS,
+    gapToBehindS: focus.live?.gapToBehindS,
+    leftPct: focus.live?.leftPct,
+    observedFinish: model?.observedFinish,
+    raceEnd: model?.raceEndIfCall,
+    takes: model?.takesIfCall,
+    keyTake: model?.keyTake,
+    opponent: model?.opponent,
+    netPass: model?.netPassIfAttack,
+    pPass: model?.pPassIfAttack,
+    whatIfCall: chosen,
+    story: model?.story,
+  }
+}
+
+export function TelemetryIncidentBoard({ sel, onLoadLaps, onOpenSimulation }) {
+  const [trend, setTrend] = useState({ loading: true })
+  const [focusId, setFocusId] = useState(null)
+  useEffect(() => {
+    if (!sel?.year || !sel?.round || !sel?.driver) return undefined
+    let live = true
+    setTrend({ loading: true })
+    setFocusId(null)
+    fetchEnergyTrend({ year: sel.year, round: sel.round, session: sel.session, driver: sel.driver })
+      .then((data) => { if (live) setTrend(data?.error ? { error: data.error } : { data }) })
+      .catch((error) => { if (live) setTrend({ error: error.message }) })
+    return () => { live = false }
+  }, [sel.year, sel.round, sel.session, sel.driver])
+
+  if (trend.loading) return <section className="ov-panel dt-incident-panel"><div className="lx-loading"><span className="lx-spinner" />FINDING ENERGY × OVERTAKE INCIDENTS FOR {sel.driver}…</div></section>
+  if (trend.error) return <section className="ov-panel dt-incident-panel"><p className="lx-empty">Incidents unavailable. {trend.error}</p></section>
+  const data = trend.data
+  const incidents = data?.incidents ?? []
+  const focus = incidents.find((item) => item.id === focusId) ?? incidents[0]
+  const live = focus?.live
+  const model = focus?.model
+  const pct01 = (value) => value == null ? '—' : `${Math.round(Number(value) * 100)}%`
+  const loadTraces = () => {
+    if (!focus || !onLoadLaps) return
+    const session = sessionNameOf(sel)
+    const rows = [{
+      year: sel.year, round: sel.round, session, driver: sel.driver, lap: focus.lap, color: '#ff7043',
+    }]
+    if (focus.otherDriver) {
+      rows.push({
+        year: sel.year, round: sel.round, session, driver: focus.otherDriver, lap: focus.lap, color: '#9db7ff',
+      })
+    }
+    onLoadLaps(rows)
+  }
+
+  return <section className="ov-panel dt-incident-panel">
+    <div className="ov-panel-head">
+      <span>LIVE INCIDENTS / {data.driver} · {String(data.event?.name || '').toUpperCase()}</span>
+      <Badge tone="derived">THIS RACE + 2018–2025 FOREST</Badge>
+    </div>
+      <p className="ov-notes">Each chip is a real close fight; ATTACK spends ~{data.attackExtraMj ?? 0.45} MJ extra, SAVE keeps ~{data.saveKeepMj ?? 0.27} MJ, HOLD leaves energy as-is.</p>
+    {!incidents.length && <p className="lx-empty">No close DRS, chase, or high-spend laps for {sel.driver} in this race.</p>}
+    <div className="dt-incident-list">
+      {incidents.map((item) => <button key={item.id} type="button" className={`dt-incident-chip ${item.kind} ${focus?.id === item.id ? 'active' : ''}`} onClick={() => setFocusId(item.id)}>
+        <em>{INCIDENT_TONE[item.kind] || item.kind}</em>
+        <b>L{item.lap}</b>
+        <span>{item.otherDriver ? `vs ${item.otherDriver}` : item.live?.event}</span>
+      </button>)}
+    </div>
+    {focus && <div className="dt-incident-live">
+      <div className="dt-incident-radio">
+        <span>LIVE AT LAP {focus.lap}</span>
+        <strong>P{live?.position ?? '—'} {live?.ahead ? `· ${live.gapToAheadS?.toFixed?.(2) ?? live.gapToAheadS}s vs ${live.ahead}` : ''}</strong>
+        <em>{live?.chased ? `${live.behind} is ${live.gapToBehindS?.toFixed?.(2) ?? live.gapToBehindS}s behind — close enough to pass` : 'nobody within 1.2s behind'}</em>
+        <p>{focus.problem}</p>
+      </div>
+      <div className="dt-incident-battery">
+        <div><span>ENERGY LEFT</span><b>{live?.leftPct == null ? '—' : `${Math.round(live.leftPct)}%`}</b><em>unused share of the 4 MJ energy-store model — not the team battery</em></div>
+        <div><span>THEY SPENT</span><b>{live?.action || '—'}</b><em>{mj(live?.consumedMj)} deployed on this lap from that store</em></div>
+        <div><span>MODEL PICK</span><b className={`call-${model?.call?.toLowerCase?.() || 'hold'}`}>{model?.call || '—'}</b><em>{model?.theyDid === model?.call ? 'same as what they spent — the useful branch is the other call' : (model?.couldDiffer ? `classified finish ${finishPos(model.observedFinish)} → ${finishPos(model.raceEndIfCall)}` : 'no extra whole place before the flag')}</em></div>
+      </div>
+      {model?.opponent && <div className="dt-incident-odds">
+        <div><span>IF THEY ATTACK</span><b>{oddsPct(model.pPassIfAttack)}</b><em>trained chance this pass lands in 2 laps</em></div>
+        <div><span>{model.opponent.driver} HOLDS</span><b>{oddsPct(model.opponent.pHold)}</b><em>they {model.opponent.theyDid || 'spent'} · {model.opponent.leftPct == null ? '—' : `${Math.round(model.opponent.leftPct)}%`} energy left</em></div>
+        <div><span>NET PASS</span><b>{oddsPct(model.netPassIfAttack)}</b><em>our pass chance after their hold chance</em></div>
+      </div>}
+      <p className="dt-incident-why">{model?.why}</p>
+      <div className="dt-incident-finish">
+        <div><span>REAL FINISH</span><b>{finishPos(model?.observedFinish)}</b><em>classified result from the real race</em></div>
+        <div><span>WHAT-IF FINISH IF {model?.whatIfCall || model?.call || 'CALL'}</span><b className={model?.placesVsHold > 0 ? 'positive' : ''}>{finishPos(model?.raceEndIfCall)}</b><em>{model?.extraPlacesIfCall ? `+${model.extraPlacesIfCall} whole place${model.extraPlacesIfCall === 1 ? '' : 's'} · key lap ${model.keyTake ? `L${model.keyTake.lap} vs ${model.keyTake.ahead}` : 'this fight'}` : 'same classified finish'}</em></div>
+        <div><span>CHANCE OF BEING PASSED</span><b>{pct01(model?.hold?.pLose)} → {pct01((model?.whatIfCall === 'ATTACK' || (!model?.whatIfCall && model?.call === 'ATTACK') ? model?.attack : model?.whatIfCall === 'SAVE' || model?.call === 'SAVE' ? model?.save : model?.hold)?.pLose)}</b><em>{model?.avoidedLose >= 0.04 ? 'lower chance the car behind passes them in the next 2 laps' : 'chance of being passed in the next 2 laps barely changes'}</em></div>
+      </div>
+      {!!model?.takesIfCall?.length && <p className="dt-incident-takes">{takeLine(model.takesIfCall)}</p>}
+      <div className="dt-incident-alts">
+        {['attack', 'save', 'hold'].map((key) => {
+          const choice = model?.[key]
+          if (!choice) return <div key={key} className="dt-incident-alt is-off"><span>{key.toUpperCase()}</span><b>EMPTY</b><em>not enough energy left for an extra ATTACK</em></div>
+          return <div key={key} className={`dt-incident-alt ${(model.whatIfCall || model.call) === key.toUpperCase() ? 'picked' : ''}`}>
+            <span>{key.toUpperCase()}{model.theyDid === key.toUpperCase() ? ' · WHAT THEY DID' : ''}</span>
+            <b>{finishPos(choice.raceEnd ?? choice.endPosition)}</b>
+            <em>{choice.extraPlaces ? `+${choice.extraPlaces} place${choice.extraPlaces === 1 ? '' : 's'} · ` : ''}{takeLine(choice.takes)} · {pct01(choice.pGain ?? choice.convertIn2)} this fight</em>
+            {onOpenSimulation && <button type="button" className="dt-incident-alt-sim" onClick={() => onOpenSimulation(buildWhatIfRequest(sel, focus, key.toUpperCase()))}>SIM {key.toUpperCase()}</button>}
+          </div>
+        })}
+      </div>
+      {model?.resultIf && <p className="ov-notes">{model.resultIf}</p>}
+      {model?.avoidedIf && <p className="ov-notes">{model.avoidedIf}</p>}
+      <p className="ov-notes">A take only counts if the trained pass chance still beats the other car’s hold chance. SAVE now is for a later lap that still has energy; ATTACK now spends that energy here.</p>
+      <div className="dt-incident-actions">
+        <button type="button" className="dt-incident-load" onClick={loadTraces}>SHOW THIS LAP ON THE TRACE{focus.otherDriver ? ` · ${sel.driver} vs ${focus.otherDriver}` : ''}</button>
+        {onOpenSimulation && <button type="button" className="dt-incident-load dt-incident-whatif" onClick={() => onOpenSimulation(buildWhatIfRequest(sel, focus))}>
+          WHAT IF {interestingCall(model)} · SHOW ON TRACK
+        </button>}
+      </div>
+    </div>}
+  </section>
+}
+
 function CachedBatteryClip({ sel }) {
   const [clip, setClip] = useState({ loading: false })
   useEffect(() => {
@@ -278,7 +470,7 @@ function CachedBatteryClip({ sel }) {
 export function useRaceEngine(sel, activeTab = 'STRATEGY') {
   const needsDecision = activeTab === 'STRATEGY' || activeTab === 'OVERTAKE'
   const needsEnergy = activeTab === 'STRATEGY' || activeTab === 'ENERGY'
-  const needsEvents = needsDecision || needsEnergy
+  const needsEvents = needsDecision || needsEnergy || activeTab === 'TELEMETRY'
   const [decision, setDecision] = useState({ loading: true })
   const [energy, setEnergy] = useState({ loading: false })
   const [preds, setPreds] = useState(null)
@@ -427,6 +619,7 @@ export function OvertakeTab({ sel, decision, preds }) {
 
 
   return <div className="dt-overtake">
+    <StrategyRaceStory sel={sel} />
     <section className="ov-panel">
       <div className="ov-panel-head"><span>DETECTED DECISION POINTS / {dp.eventName?.toUpperCase()}</span><span><Badge tone="derived">GAP + SPEED-TRAP</Badge> <Badge tone="real">{dp.lappingExcludedCount ?? 0} LAPPING EXCLUDED</Badge></span></div>
       <div className="dt-bignum"><strong>{rows.length}</strong><span>BATTLES DETECTED · {dp.totalLaps} LAPS · ANALYSIS WINDOW {dp.maxGapThresholdS}s</span></div>
@@ -692,11 +885,42 @@ export function ValidationTab({ report }) {
 
 // ─── ENERGY tab ──────────────────────────────────────────────────────────────
 
-function SocChart({ laps }) {
+function chartX(index, count, width, pad) {
+  return pad.x + (index / Math.max(count - 1, 1)) * (width - pad.x - pad.r)
+}
+
+function EnergyMarks({ series, width, height, pad, focusLap, onFocus, yFor }) {
+  const count = Math.max(series.length, 1)
+  return series.map((point, index) => {
+    const x = chartX(index, count, width, pad)
+    const overtake = point.event === 'OVERTAKE' || point.flags?.includes('OVERTAKE')
+    const chased = point.chased || point.flags?.includes('CHASED')
+    const missed = point.flags?.includes('MISSED_DRS')
+    const spend = point.flags?.includes('HIGH_SPEND') || point.flags?.includes('SPEND_HERE')
+    if (!overtake && !chased && !missed && !spend) return null
+    const fill = overtake ? '#ff7043' : spend ? '#f3c85b' : missed ? '#9db7ff' : '#63e6be'
+    const y = yFor ? yFor(point, index) : pad.y + 4
+    return <circle
+      key={`${point.lap}-${index}`}
+      className={focusLap === point.lap ? 'dt-energy-dot is-focus' : 'dt-energy-dot'}
+      cx={x}
+      cy={y}
+      r={focusLap === point.lap ? 5 : 3.4}
+      fill={fill}
+      role="button"
+      tabIndex={0}
+      onClick={() => onFocus?.(point.lap)}
+    >
+      <title>{`L${point.lap} ${point.flags?.join(' · ') || point.event}`}</title>
+    </circle>
+  })
+}
+
+function SocChart({ laps, series = [], focusLap, onFocus }) {
   const width = 760, height = 190, pad = { x: 40, y: 18, r: 16, b: 26 }
   const window_ = 4.0
   const pts = laps.map((l, i) => {
-    const x = pad.x + (i / Math.max(laps.length - 1, 1)) * (width - pad.x - pad.r)
+    const x = chartX(i, laps.length, width, pad)
     const y = pad.y + (1 - Math.min(l.socEndMj, window_) / window_) * (height - pad.y - pad.b)
     return `${x},${y}`
   })
@@ -708,15 +932,16 @@ function SocChart({ laps }) {
         <line x1={pad.x} y1={height - pad.b} x2={width - pad.r} y2={height - pad.b} />
       </g>
       <polyline className="chart-primary" points={pts.join(' ')} />
+      <EnergyMarks series={series} width={width} height={height} pad={pad} focusLap={focusLap} onFocus={onFocus} />
     </svg>
     <div className="chart-axis"><span>{window_} MJ</span><span>2 MJ</span><span>0 MJ</span><b>BATTERY STATE OF CHARGE / LAP</b></div>
   </div>
 }
 
-function DeployHarvestChart({ laps }) {
+function DeployHarvestChart({ laps, series = [], focusLap, onFocus }) {
   const width = 760, height = 170, pad = { x: 40, y: 16, r: 16, b: 24 }
   const maxV = Math.max(...laps.map((l) => Math.max(l.deployMj ?? 0, l.harvestMj ?? 0)), 1) * 1.1
-  const bw = (width - pad.x - pad.r) / laps.length
+  const bw = (width - pad.x - pad.r) / Math.max(laps.length, 1)
   return <div className="ov-chart">
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Per-lap deployment vs harvest">
       {laps.map((l, i) => {
@@ -729,26 +954,190 @@ function DeployHarvestChart({ laps }) {
           <rect x={x + bw * 0.52} y={base - hh} width={bw * 0.34} height={hh} fill="#63e6be" opacity="0.85" />
         </g>
       })}
+      <EnergyMarks series={series} width={width} height={height} pad={pad} focusLap={focusLap} onFocus={onFocus} />
     </svg>
     <div className="chart-axis"><span>{maxV.toFixed(1)} MJ</span><span>—</span><span>0</span><b>DEPLOY (ORANGE) vs HARVEST (TEAL) / LAP</b></div>
   </div>
 }
 
-export function EnergyTab({ sel, energy }) {
-  if (energy.loading) return <div className="lx-loading"><span className="lx-spinner" />COMPUTING 2026-REG ENERGY PROJECTION FOR {sel.driver}…</div>
-  if (energy.error) return <p className="lx-empty">Energy projection failed for {sel.driver}: {energy.error}</p>
+function StandingChart({ series, focusLap, onFocus }) {
+  if (!series?.length) return null
+  const width = 760, height = 168, pad = { x: 40, y: 16, r: 16, b: 24 }
+  const maxP = Math.max(...series.map((point) => point.position || 1), 1)
+  const pts = series.map((point, index) => {
+    const x = chartX(index, series.length, width, pad)
+    const y = pad.y + ((point.position - 1) / Math.max(maxP - 1, 1)) * (height - pad.y - pad.b)
+    return `${x},${y}`
+  })
+  return <div className="ov-chart">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Running position across the race">
+      <g className="chart-grid">
+        <line x1={pad.x} y1={pad.y} x2={width - pad.r} y2={pad.y} />
+        <line x1={pad.x} y1={height - pad.b} x2={width - pad.r} y2={height - pad.b} />
+      </g>
+      <polyline className="chart-secondary" points={pts.join(' ')} />
+      <EnergyMarks
+        series={series}
+        width={width}
+        height={height}
+        pad={pad}
+        focusLap={focusLap}
+        onFocus={onFocus}
+        yFor={(point) => pad.y + ((point.position - 1) / Math.max(maxP - 1, 1)) * (height - pad.y - pad.b)}
+      />
+    </svg>
+    <div className="chart-axis"><span>P1</span><span>P{Math.round(maxP / 2)}</span><span>P{maxP}</span><b>RUNNING ORDER / LAP · P1 AT TOP</b></div>
+  </div>
+}
+
+function ModelledConsumeChart({ series, focusLap, onFocus }) {
+  if (!series?.length) return null
+  const width = 760, height = 168, pad = { x: 40, y: 16, r: 16, b: 24 }
+  const maxV = Math.max(...series.map((point) => point.consumedMj ?? 0), 0.4) * 1.15
+  const bw = (width - pad.x - pad.r) / series.length
+  return <div className="ov-chart">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Modelled energy used per lap">
+      {series.map((point, index) => {
+        const x = pad.x + index * bw
+        const h = ((point.consumedMj ?? 0) / maxV) * (height - pad.y - pad.b)
+        const fill = point.event === 'OVERTAKE' ? '#ff7043' : point.chased ? '#63e6be' : point.flags?.includes('MISSED_DRS') ? '#9db7ff' : '#ffb36c'
+        return <rect key={point.lap} x={x + bw * 0.18} y={height - pad.b - h} width={Math.max(bw * 0.64, 1)} height={h} fill={fill} opacity={focusLap === point.lap ? 1 : 0.82} onClick={() => onFocus?.(point.lap)} />
+      })}
+    </svg>
+    <div className="chart-axis"><span>{maxV.toFixed(2)} MJ</span><span>—</span><span>0</span><b>MODELLED DEPLOY / LAP · ORANGE TAKE · TEAL CHASED · BLUE MISSED DRS</b></div>
+  </div>
+}
+
+function markSeries(series, windows = []) {
+  const missed = new Set((windows || []).filter((item) => !item.converted).map((item) => item.startLap))
+  const spend = new Set((windows || []).filter((item) => item.counterfactual?.verdict === 'SPEND HERE').map((item) => item.startLap))
+  return (series || []).map((point) => ({
+    ...point,
+    flags: [
+      ...(point.flags || []),
+      ...(missed.has(point.lap) ? ['MISSED_DRS'] : []),
+      ...(spend.has(point.lap) ? ['SPEND_HERE'] : []),
+    ],
+  }))
+}
+
+function EnergyBattlePanel({ sel, trend, focusLap, onFocus, onOpenSimulation }) {
+  if (trend.loading) return <section className="ov-panel dt-energy-story"><div className="lx-loading"><span className="lx-spinner" />JOINING ENERGY TO 2018–2025 OVERTAKE TREND FOR {sel.driver}…</div></section>
+  if (trend.error) return <section className="ov-panel dt-energy-story"><p className="lx-empty">Energy trend unavailable. {trend.error}</p></section>
+  const data = trend.data
+  if (!data) return null
+  const series = markSeries(data.series, data.windows)
+  const hist = data.trend || {}
+  const best = data.bestCounterfactual
+  const pct01 = (value) => value == null ? '—' : `${Math.round(Number(value) * 100)}%`
+  return <section className="ov-panel dt-energy-story">
+    <div className="ov-panel-head">
+      <span>ENERGY × OVERTAKE / {data.driver} · {String(data.event?.name || '').toUpperCase()}</span>
+      <Badge tone="derived">2018–2025 TREND · NOT A DRAW</Badge>
+    </div>
+    <p className="ov-notes">Orange is a pass, teal is being hunted, blue is a 1.0s window they left; energy left is our 4 MJ store model, not the team battery.</p>
+    <div className="dt-story-focus">
+      <div><span>PASSES</span><b>{data.summary?.overtakes ?? 0}</b><em>places they actually gained</em></div>
+      <div><span>1.0s WINDOWS</span><b>{data.summary?.drsConverted}/{data.summary?.drsWindows}</b><em>passed / times they sat in DRS range</em></div>
+      <div><span>HUNTED LAPS</span><b>{data.summary?.chaseLaps ?? 0}</b><em>laps with someone ≤ 1.2s behind</em></div>
+      <div><span>PEAK SPEND</span><b>{mj(data.summary?.peakConsumeMj)}</b><em>most modelled deploy, lap {data.summary?.peakConsumeLap ?? '—'}</em></div>
+    </div>
+    {data.whatIf && <div className="dt-incident-finish dt-whatif-board">
+      <div><span>REAL FINISH</span><b>{finishPos(data.whatIf.observedFinish)}</b><em>classified result from the real race</em></div>
+      <div><span>WHAT-IF FINISH IF {data.whatIf.bestCall || 'CALL'} L{data.whatIf.bestLap ?? '—'}</span><b className={data.whatIf.extraPlaces > 0 ? 'positive' : ''}>{finishPos(data.whatIf.endIfCall)}</b><em>{data.whatIf.keyTake ? `key lap L${data.whatIf.keyTake.lap} vs ${data.whatIf.keyTake.ahead}` : (data.whatIf.extraPlaces ? `+${data.whatIf.extraPlaces} whole place${data.whatIf.extraPlaces === 1 ? '' : 's'} to the flag` : 'same classified finish')}</em></div>
+      <div><span>CHANCE OF BEING PASSED</span><b>{data.whatIf.avoidedLose == null || Math.abs(data.whatIf.avoidedLose) < 0.02 ? '—' : `${data.whatIf.avoidedLose >= 0 ? '−' : '+'}${Math.round(Math.abs(data.whatIf.avoidedLose) * 100)}pt`}</b><em>change in the next-2-lap chance of being passed</em></div>
+    </div>}
+    {!!data.whatIf?.takes?.length && <p className="dt-incident-takes">{takeLine(data.whatIf.takes)}</p>}
+    {data.whatIf?.note && <p className="ov-notes">{data.whatIf.note}</p>}
+    {onOpenSimulation && data.whatIf?.bestLap != null && <button type="button" className="dt-incident-load dt-incident-whatif" onClick={() => onOpenSimulation({
+      year: sel.year, round: sel.round, session: sessionNameOf(sel), driver: data.driver,
+      lap: data.whatIf.bestLap, otherDriver: (data.incidents || []).find((item) => item.id === data.whatIf.bestIncidentId)?.otherDriver,
+      call: mapSimCall(data.whatIf.bestCall), kind: data.whatIf.bestKind, theyDid: data.whatIf.theyDid,
+      problem: (data.incidents || []).find((item) => item.id === data.whatIf.bestIncidentId)?.model?.resultIf
+        || (data.incidents || []).find((item) => item.id === data.whatIf.bestIncidentId)?.problem,
+      leftPct: (data.incidents || []).find((item) => item.id === data.whatIf.bestIncidentId)?.live?.leftPct,
+      observedFinish: data.whatIf.observedFinish, raceEnd: data.whatIf.endIfCall,
+      takes: data.whatIf.takes, keyTake: data.whatIf.keyTake, opponent: data.whatIf.opponent, netPass: data.whatIf.netPass,
+    })}>WHAT IF {mapSimCall(data.whatIf.bestCall)} L{data.whatIf.bestLap} · SHOW ON TRACK</button>}
+    <div className="dt-energy-hist">
+      <div><span>{data.driver} ENERGY WHEN THEY PASSED</span><b>{hist.medianLeftPctEarlyConvert == null ? '—' : `${hist.medianLeftPctEarlyConvert}%`}</b><em>median energy left on early laps (1–15) when they actually passed, {hist.years || '2018–2025'}</em></div>
+      <div><span>{data.driver} ENERGY WHEN THEY MISSED</span><b>{hist.medianLeftPctEarlyMiss == null ? '—' : `${hist.medianLeftPctEarlyMiss}%`}</b><em>median energy left when they sat inside 1.0s early and did not pass</em></div>
+      <div><span>PASS RATE WITH ENERGY LEFT</span><b>{pct01(hist.highLeftConvertRate)}</b><em>how often a 1.0s window with ≥70% energy left became a pass</em></div>
+      <div><span>PASS RATE WHILE HUNTED</span><b>{pct01(hist.chaseConvertRate)}</b><em>how often they passed while also covering a car behind</em></div>
+    </div>
+    <div className="ov-panel-head second"><span>RUNNING ORDER</span><Badge tone="real">TIMING POSITION</Badge></div>
+    <StandingChart series={series} focusLap={focusLap} onFocus={onFocus} />
+    <div className="ov-panel-head second"><span>WHERE ENERGY WAS USED</span><Badge tone="simulated">MODELLED ES</Badge></div>
+    <ModelledConsumeChart series={series} focusLap={focusLap} onFocus={onFocus} />
+    <div className="dt-energy-legend">
+      <span><i style={{ background: '#ff7043' }} />TAKE</span>
+      <span><i style={{ background: '#63e6be' }} />CHASED</span>
+      <span><i style={{ background: '#9db7ff' }} />MISSED DRS</span>
+      <span><i style={{ background: '#f3c85b' }} />SPEND-HERE (FOREST)</span>
+    </div>
+    {data.hotspots?.length > 0 && <div className="dt-energy-hots">
+      <span>HIGHEST MODELLED DEPLOY</span>
+      {data.hotspots.map((item) => <button key={item.lap} type="button" className={focusLap === item.lap ? 'active' : ''} onClick={() => onFocus(item.lap)}>
+        <b>L{item.lap}</b>
+        <em>{mj(item.consumedMj)}</em>
+        <small>{item.event}{item.chased ? ' · CHASED' : ''}{item.inDrs ? ' · DRS' : ''}</small>
+      </button>)}
+    </div>}
+    {data.windows?.length > 0 && <div className="dt-energy-windows">
+      <span>1.0s WINDOWS · PASSED OR LEFT · WHAT IF THEY SPENT HERE</span>
+      {data.windows.map((item) => {
+        const cf = item.counterfactual
+        return <div key={`${item.startLap}-${item.ahead}`} role="button" tabIndex={0} className={`dt-energy-cf ${item.converted ? 'took' : 'miss'} ${focusLap === item.startLap ? 'active' : ''}`} onClick={() => onFocus(item.startLap)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onFocus(item.startLap) }}>
+          <strong>L{item.startLap} vs {item.ahead} · {item.converted ? 'TOOK' : 'MISSED'}</strong>
+          <em>energy left {item.leftPct == null ? '—' : `${Math.round(item.leftPct)}%`} · deploy {mj(item.consumedMj)} · held {item.waitLaps} laps{item.chased ? ' · chased' : ''}</em>
+          {cf && <b>{cf.verdict}</b>}
+          {cf && <p>{cf.note}</p>}
+          {cf && !item.converted && <small>
+            IF ATTACK finish {finishPos(cf.raceEndIfAttack ?? cf.endIfAttack)}
+            {' · '}IF HOLD finish {finishPos(cf.raceEndIfHold ?? cf.endIfHold)}
+            {cf.takesIfAttack?.length ? ` · ${takeLine(cf.takesIfAttack)}` : ''}
+          </small>}
+          {onOpenSimulation && <button type="button" className="dt-incident-load dt-incident-whatif" onClick={(event) => {
+            event.stopPropagation()
+            onOpenSimulation({
+              year: sel.year, round: sel.round, session: sessionNameOf(sel), driver: data.driver,
+              lap: item.startLap, otherDriver: item.ahead,
+              call: item.converted ? 'HOLD' : mapSimCall(cf?.call || 'ATTACK'),
+              kind: item.converted ? 'TOOK' : 'MISS_ATTACK',
+              problem: cf?.note,
+              theyDid: cf?.actualAction,
+              leftPct: item.leftPct,
+              gapToAheadS: item.gapToAheadS,
+            })
+          }}>WHAT IF {item.converted ? 'HOLD' : mapSimCall(cf?.call || 'ATTACK')} · SHOW ON TRACK</button>}
+        </div>
+      })}
+    </div>}
+    {best?.counterfactual && <p className="ov-notes">Missed 1.0s windows × {data.driver}’s 2018–2025 pass rate ≈ {data.summary?.expectedExtraPlaces ?? '—'} extra places — a rate, not a rewritten result.</p>}
+  </section>
+}
+
+export function EnergyTab({ sel, energy, onOpenSimulation }) {
+  const [trend, setTrend] = useState({ loading: true })
+  const [focusLap, setFocusLap] = useState(null)
+  useEffect(() => {
+    if (!sel?.year || !sel?.round || !sel?.driver) return undefined
+    let live = true
+    setTrend({ loading: true })
+    setFocusLap(null)
+    fetchEnergyTrend({ year: sel.year, round: sel.round, session: sel.session, driver: sel.driver })
+      .then((data) => { if (live) setTrend(data?.error ? { error: data.error } : { data }) })
+      .catch((error) => { if (live) setTrend({ error: error.message }) })
+    return () => { live = false }
+  }, [sel.year, sel.round, sel.session, sel.driver])
+
+  const marked = markSeries(trend.data?.series, trend.data?.windows)
   const d = energy.data
-  // When entering Energy repeatedly, the hook can briefly clear the previous
-  // payload before the next request marks itself loading. Render a stable
-  // loading state instead of dereferencing null and blanking the app.
-  if (!d) return <div className="lx-loading"><span className="lx-spinner" />COMPUTING 2026-REG ENERGY PROJECTION FOR {sel.driver}…</div>
-  const laps = d.laps ?? []
-  const g = d.gates ?? {}
+  const laps = d?.laps ?? []
+  const g = d?.gates ?? {}
   const za = g.zoneAlignment ?? {}, ce = g.ceilings ?? {}, ct = g.crossTrackConsistency ?? {}
-  const rule = d.regulation ?? {}
+  const rule = d?.regulation ?? {}
   const uses2026Defaults = rule.uses2026Defaults === true
-  // SoC is a modelled 0–4 MJ energy-store state.  Put the values in text as
-  // well as on the chart: a trace alone does not let a user inspect a lap.
   const startSoc = laps[0]?.socStartMj ?? null
   const finishSoc = laps.at(-1)?.socEndMj ?? null
   const lowestSocLap = laps.length
@@ -757,34 +1146,43 @@ export function EnergyTab({ sel, energy }) {
   const highestSocLap = laps.length
     ? laps.reduce((highest, lap) => (lap.socEndMj ?? -Infinity) > (highest.socEndMj ?? -Infinity) ? lap : highest, laps[0])
     : null
+  const overlay = marked.length
+    ? marked
+    : laps.map((lap) => ({ lap: lap.lap, flags: [] }))
 
   return <div className="dt-energy">
+    <EnergyBattlePanel sel={sel} trend={trend} focusLap={focusLap} onFocus={setFocusLap} onOpenSimulation={onOpenSimulation} />
     <section className="ov-panel">
-      <div className="ov-panel-head"><span>ENERGY PROJECTION / {d.driver} · {d.year} R{d.round}</span><Badge tone="simulated">{uses2026Defaults ? 'MODELLED · FIA 2026 DEFAULTS' : 'MODELLED · HISTORICAL SURROGATE'}</Badge></div>
+      <div className="ov-panel-head"><span>ENERGY PROJECTION / {d?.driver || sel.driver} · {d?.year || sel.year} R{d?.round || sel.round}</span><Badge tone="simulated">{d ? (uses2026Defaults ? 'MODELLED · FIA 2026 DEFAULTS' : 'MODELLED · HISTORICAL SURROGATE') : 'LOADING TELEMETRY TRACE'}</Badge></div>
       <div className="ov-energy-list">
         <div><b>{num(ct.meanDeployMjPerLap, 2)} MJ</b><span>DEPLOY / LAP</span><strong>ERS-K OUTPUT</strong></div>
         <div><b>{num(ct.meanHarvestMjPerLap, 2)} MJ</b><span>HARVEST / LAP</span><strong>REGEN UNDER BRAKING</strong></div>
         <div><b>{num(ct.meanFuelEnergyMjPerLap, 1)} MJ</b><span>FUEL ENERGY / LAP</span><strong>ICE BURN</strong></div>
       </div>
       <div className="ov-panel-head second"><span>BATTERY STATE OF CHARGE ACROSS THE RACE</span><Badge tone="simulated">4 MJ WINDOW</Badge></div>
-      <p className="ov-notes">SoC is the modelled energy-store balance, constrained to a 0–4 MJ window. It is not private team battery telemetry.</p>
+      <p className="ov-notes">State of charge here is a 0–4 MJ energy-store model from public telemetry, not the team’s private battery.</p>
       <div className="dt-soc-summary" aria-label="Modelled state of charge summary">
         <div><span>START SOC</span><b>{mj(startSoc)}</b><em>LAP 1 OPENING</em></div>
         <div><span>FINISH SOC</span><b>{mj(finishSoc)}</b><em>LAP {laps.at(-1)?.lap ?? '—'} END</em></div>
         <div><span>LOWEST SOC</span><b>{mj(lowestSocLap?.socEndMj)}</b><em>LAP {lowestSocLap?.lap ?? '—'} END</em></div>
         <div><span>HIGHEST SOC</span><b>{mj(highestSocLap?.socEndMj)}</b><em>LAP {highestSocLap?.lap ?? '—'} END</em></div>
       </div>
-      <SocChart laps={laps} />
+      {energy.loading && !d && <div className="lx-loading"><span className="lx-spinner" />COMPUTING 2026-REG ENERGY PROJECTION FOR {sel.driver}…</div>}
+      {energy.error && !d && <p className="lx-empty">Telemetry energy projection failed for {sel.driver}: {energy.error}. The overtake-energy story above still uses the cached race.</p>}
+      {laps.length > 0 && <>
+      <SocChart laps={laps} series={overlay} focusLap={focusLap} onFocus={setFocusLap} />
       <div className="ov-panel-head second"><span>PER-LAP DEPLOY vs HARVEST</span><Badge tone="simulated">MODELLED</Badge></div>
-      <DeployHarvestChart laps={laps} />
+      <DeployHarvestChart laps={laps} series={overlay} focusLap={focusLap} onFocus={setFocusLap} />
       <p className="ov-notes">{uses2026Defaults
         ? 'Projected from real speed/throttle/brake telemetry under published global 2026 limits — never measured team data. Competition-specific Overtake, Recharge and power-curve settings remain unloaded.'
-        : 'Projected from real speed/throttle/brake telemetry with a modelled surrogate. This historical view is not presented as 2026 FIA compliance.'} Total clipping this race: {num(ct.totalClipSeconds, 1)} s.</p>
+        : 'Projected from real speed/throttle/brake telemetry with a modelled surrogate. This historical view is not presented as 2026 FIA compliance.'} Total clipping this race: {num(ct.totalClipSeconds, 1)} s. Orange / teal / blue marks on these traces are the same take / chase / missed-DRS laps as the story above.</p>
+      </>}
     </section>
 
     <section className="ov-panel dt-gates">
       <div className="ov-panel-head"><span>VALIDATION GATES</span><Badge tone="derived">PHYSICS SANITY</Badge></div>
-
+      {!d && <p className="ov-notes">Gates appear after the telemetry energy projection finishes. The overtake-energy story does not wait on that pass.</p>}
+      {d && <>
       <div className="dt-gatecard">
         <div className="dt-gatehead"><b>01 · ZONE ALIGNMENT</b><GatePill pass={za.pass} /></div>
         <div className="dt-gaterow"><span>Deploy at full throttle</span><strong>{pct(za.deployAtFullThrottlePct, 1)}</strong></div>
@@ -809,10 +1207,11 @@ export function EnergyTab({ sel, energy }) {
 
       <div className="ov-panel-head second"><span>REGULATION CITATIONS</span><Badge tone="real">{uses2026Defaults ? 'FIA 2026 · ISSUE 20' : 'MODELLED / ERA PENDING'}</Badge></div>
       {rule.note && <p className="ov-notes">{rule.note}</p>}
-      {Object.entries(d.citations ?? {}).map(([k, v]) => <div className="ov-factor" key={k}>
+      {Object.entries(d?.citations ?? {}).map(([k, v]) => <div className="ov-factor" key={k}>
         <span>{k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase())}</span>
         <b className="positive">{v}</b>
       </div>)}
+      </>}
     </section>
   </div>
 }
@@ -910,9 +1309,16 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
     ? replay.data
     : null
 
-  if (decision.loading) return <div className="lx-loading"><span className="lx-spinner" />BUILDING FUSED DECISION…</div>
-  if (rows.length && (preds?.loading || !preds)) return <div className="lx-loading"><span className="lx-spinner" />SCORING DETECTED BATTLES</div>
+  if (decision.loading) return <div className="dt-strategy">
+    <StrategyRaceStory sel={sel} onSelectDriver={onSelectDriver} />
+    <div className="lx-loading"><span className="lx-spinner" />BUILDING FUSED DECISION…</div>
+  </div>
+  if (rows.length && (preds?.loading || !preds)) return <div className="dt-strategy">
+    <StrategyRaceStory sel={sel} onSelectDriver={onSelectDriver} />
+    <div className="lx-loading"><span className="lx-spinner" />SCORING DETECTED BATTLES</div>
+  </div>
   if (!focus) return <div className="dt-strategy">
+    <StrategyRaceStory sel={sel} onSelectDriver={onSelectDriver} />
     <CachedBatteryClip sel={sel} />
     {preds?.error && selectedDriverHasSourceRows
       ? <p className="lx-empty"><b>RACE TIMING IS LOADED; MODEL SCORING DID NOT COMPLETE.</b> {sel.driver} has extracted close-battle points in this race, but the classifier request failed: {preds.error}. Retry the page; this is not a “no battle” result.</p>
@@ -926,8 +1332,7 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
         </button>)}
       </div>
     </section>}
-    <RacePositionSummary summaries={dp?.driverSummaries} selectedDriver={sel.driver} />
-  </div>
+     </div>
 
   const p = focus.pred.probabilities
   const rec = focus.pred.label
@@ -939,6 +1344,7 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
   const trainingExclusions = (focus.exclusionReasons ?? []).join(', ').replaceAll('_', ' ').toLowerCase()
 
   return <div className="dt-strategy">
+    <StrategyRaceStory sel={sel} onSelectDriver={onSelectDriver} />
     <CachedBatteryClip sel={sel} />
     <div className="ov-alert" style={{ borderLeftColor: STRATEGY_COLORS[rec], background: `${STRATEGY_COLORS[rec]}14` }}>
       <span style={{ color: STRATEGY_COLORS[rec] }}>◆</span>
@@ -1005,8 +1411,7 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
       </aside>
     </div>
 
-    <RacePositionSummary summaries={dp?.driverSummaries} selectedDriver={sel.driver} />
-
+   
     <div className="ov-strategy-row">
       <div className="ov-section-label"><span>{sel.driver} BATTLES + OBSERVED PASSES</span><b>SELECT A LAP TO INSPECT</b></div>
       <div className="dt-lapstrip">

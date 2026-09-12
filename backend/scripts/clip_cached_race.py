@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from ai_energy_rollout import rollout
+from energy_transition import CAPACITY_MJ, era_for_year, transition_soc
 from fetch_f1_session import CACHE_DIR
 
 SESSIONS = CACHE_DIR.parent / 'sessions'
@@ -121,8 +122,144 @@ def build_actual_laps(payload: dict, driver: str, defender: str) -> list[dict]:
     return rows
 
 
+def build_field_story(payload: dict) -> dict:
+    """Running order, overtakes, and slow laps from cached FastF1 times only.
+
+    No team battery is present in this cache. Do not invent SoC.
+    """
+    by_driver: dict[str, dict[int, dict]] = {}
+    for row in payload.get('laps') or []:
+        driver = row.get('driver')
+        lap = row.get('lapNumber')
+        if not driver or lap is None or row.get('lapTimeS') is None:
+            continue
+        by_driver.setdefault(driver, {})[int(lap)] = row
+
+    classified = {
+        item['abbr']: item
+        for item in (payload.get('drivers') or [])
+        if item.get('abbr')
+    }
+    race_time = {driver: 0.0 for driver in by_driver}
+    traces: dict[str, list[dict]] = {driver: [] for driver in by_driver}
+    all_laps = sorted({lap for laps in by_driver.values() for lap in laps})
+
+    for lap in all_laps:
+        present = [driver for driver in by_driver if lap in by_driver[driver]]
+        if not present:
+            continue
+        for driver in present:
+            race_time[driver] += float(by_driver[driver][lap]['lapTimeS'])
+        order = sorted((driver for driver in race_time if race_time[driver] > 0), key=lambda driver: race_time[driver])
+        for index, driver in enumerate(order):
+            if lap not in by_driver[driver]:
+                continue
+            row = by_driver[driver][lap]
+            lap_s = float(row['lapTimeS'])
+            ahead = order[index - 1] if index else None
+            behind = order[index + 1] if index + 1 < len(order) else None
+            gap = 0.0 if ahead is None else round(race_time[driver] - race_time[ahead], 3)
+            gap_behind = 0.0 if behind is None else round(race_time[behind] - race_time[driver], 3)
+            closing = 0.0
+            if ahead and lap in by_driver.get(ahead, {}):
+                closing = round(float(by_driver[ahead][lap]['lapTimeS']) - lap_s, 3)
+            traces[driver].append({
+                'lap': lap,
+                'lapTimeS': lap_s,
+                'compound': row.get('compound'),
+                'isPitLap': bool(row.get('isPitLap')),
+                'timingPosition': index + 1,
+                'gapToAheadS': gap,
+                'gapToBehindS': gap_behind,
+                'closingRateS': closing,
+                'ahead': ahead,
+                'behind': behind,
+            })
+
+    drivers_out = []
+    for item in sorted(classified.values(), key=lambda row: row.get('position') or 99):
+        code = item['abbr']
+        laps = traces.get(code) or []
+        if not laps:
+            continue
+        prev_pos = None
+        prev_time = None
+        for step in laps:
+            pos = step['timingPosition']
+            pos_change = 0 if prev_pos is None else prev_pos - pos
+            delta = None if prev_time is None else round(step['lapTimeS'] - prev_time, 3)
+            if step['isPitLap']:
+                event = 'PIT'
+            elif pos_change > 0:
+                event = 'OVERTAKE'
+            elif delta is not None and (delta >= 0.25 or (step['closingRateS'] <= -0.2 and step['gapToAheadS'] > 0)):
+                event = 'SLOW'
+            else:
+                event = 'HOLD'
+            step['event'] = event
+            step['posChange'] = pos_change
+            step['deltaToPrevS'] = delta
+            prev_pos = pos
+            if not step['isPitLap']:
+                prev_time = step['lapTimeS']
+
+        era = era_for_year((payload.get('event') or {}).get('year'))
+        soc = float(CAPACITY_MJ)
+        used = 0.0
+        for step in laps:
+            if step['event'] == 'OVERTAKE' or step['closingRateS'] >= 0.15:
+                action = 'ATTACK'
+            elif step['event'] == 'SLOW' or step['isPitLap']:
+                action = 'SAVE'
+            else:
+                action = 'DELAY'
+            start = soc
+            soc, deploy, harvest = transition_soc(
+                soc, action,
+                {'gapS': step['gapToAheadS'], 'closingRateS': step['closingRateS'], 'pace': 0.55},
+                era=era,
+            )
+            used += deploy
+            step['modelled'] = {
+                'label': 'MODELLED',
+                'action': action,
+                'startPct': round((start / CAPACITY_MJ) * 100.0, 1),
+                'endPct': round((soc / CAPACITY_MJ) * 100.0, 1),
+                'consumedMj': deploy,
+                'harvestedMj': harvest,
+                'usedMj': round(used, 3),
+                'note': 'Started at 100% of the 4 MJ window. Not team telemetry.',
+            }
+
+        overtake_laps = [step['lap'] for step in laps if step['event'] == 'OVERTAKE']
+        slow_laps = [step['lap'] for step in laps if step['event'] == 'SLOW']
+        after_pass_slow = 0
+        for step in laps:
+            if step['event'] != 'OVERTAKE':
+                continue
+            nxt = next((row for row in laps if row['lap'] == step['lap'] + 1), None)
+            if nxt and (nxt['event'] == 'SLOW' or (nxt['deltaToPrevS'] or 0) > 0.15):
+                after_pass_slow += 1
+        drivers_out.append({
+            'driver': code,
+            'name': item.get('name'),
+            'classifiedPosition': item.get('position'),
+            'overtakeLaps': overtake_laps,
+            'slowLaps': slow_laps,
+            'overtakes': len(overtake_laps),
+            'slows': len(slow_laps),
+            'afterPassNextLapSlower': after_pass_slow,
+            'laps': laps,
+        })
+    return {
+        'provenance': 'REAL lap times, order, gaps · MODELLED ES starts at 100% of the 4 MJ window and is not team battery',
+        'drivers': drivers_out,
+    }
+
+
 def clip_cached(year: int | None, round_number: int | None, session_name: str,
-                driver: str | None, defender: str | None, policy: str) -> dict:
+                driver: str | None, defender: str | None, policy: str,
+                start_soc_mj: float | None = None) -> dict:
     if year and round_number:
         path = session_path(year, round_number, session_name)
         if not path.exists():
@@ -139,13 +276,17 @@ def clip_cached(year: int | None, round_number: int | None, session_name: str,
     racing = [row for row in laps if not row['pitDistorted']]
     if not racing:
         return {'error': f'no shared timed laps for {driver} vs {defender}'}
+    # Lights-out is a full 4 MJ C5.2 window (100%). The model then
+    # consumes and harvests from actual timed laps — not team SoC.
+    start = 4.0 if start_soc_mj is None else float(start_soc_mj)
     result = rollout({
         'year': year,
         'policy': policy,
         'laps': racing,
-        'startSocMj': 2.8,
+        'startSocMj': start,
         'overtakeActive': False,
     })
+    result['field'] = build_field_story(payload)
     result['actualRace'] = {
         'path': str(path),
         'event': event,
@@ -177,11 +318,12 @@ def main() -> None:
     parser.add_argument('--driver')
     parser.add_argument('--defender')
     parser.add_argument('--policy', default='AUTO')
+    parser.add_argument('--start-soc', type=float, default=4.0, help='modelled lights-out SoC in MJ; 4.0 is a full C5.2 window')
     parser.add_argument('--first', action='store_true', help='use the earliest cached race on disk')
     args = parser.parse_args()
     year = None if args.first else args.year
     round_number = None if args.first else args.round
-    print(json.dumps(clip_cached(year, round_number, args.session, args.driver, args.defender, args.policy)))
+    print(json.dumps(clip_cached(year, round_number, args.session, args.driver, args.defender, args.policy, args.start_soc)))
 
 
 if __name__ == '__main__':
@@ -192,6 +334,7 @@ if __name__ == '__main__':
             payload.get('session') or 'Race',
             payload.get('driver'), payload.get('defender'),
             payload.get('policy') or 'AUTO',
+            payload.get('startSocMj'),
         )))
     else:
         main()

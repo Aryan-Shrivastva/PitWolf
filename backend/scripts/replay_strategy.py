@@ -272,6 +272,12 @@ def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
     action_changes: list[dict[str, Any]] = []
     last_action = None
 
+    forced = payload.get("forcedFirstAction") or payload.get("forcedAction")
+    if forced == "HOLD":
+        forced = "DELAY"
+    if forced not in ACTIONS:
+        forced = None
+
     while state["lap"] <= total_laps:
         candidates = []
         for action in ACTIONS:
@@ -307,7 +313,12 @@ def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
                 "opponentResponseScore": response_score,
                 "utility": utility,
             })
-        chosen = max(candidates, key=lambda candidate: candidate["utility"])
+        if not path and forced:
+            chosen = next((candidate for candidate in candidates if candidate["action"] == forced), None)
+            if chosen is None:
+                chosen = max(candidates, key=lambda candidate: candidate["utility"])
+        else:
+            chosen = max(candidates, key=lambda candidate: candidate["utility"])
         entry = {key: chosen[key] for key in (
             "action", "probability", "aheadProbability", "ourSoc", "defenderSoc",
             "deployMj", "harvestMj", "opponentAction", "opponentDeployMj",
@@ -315,7 +326,8 @@ def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
         entry.update({
             "lap": state["lap"],
             "role": "DEFENDING" if state["ahead"] else "ATTACKING",
-            "contextSource": "START_STATE_CARRIED_FUTURE_BLIND",
+            "contextSource": "FORCED_WHAT_IF_FIRST_LAP" if (not path and forced) else "START_STATE_CARRIED_FUTURE_BLIND",
+            "forced": bool(not path and forced),
             "pitPlan": "NO BOX MODEL · START STATE CARRIED",
         })
         path.append(entry)
@@ -356,6 +368,8 @@ def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
         "schemaVersion": "race-branch.v1",
         "treeVersion": "future-blind-two-car-rollout.v1",
         "mode": "FUTURE_BLIND_RACE_ROLLOUT",
+        "forcedFirstAction": forced,
+        "whatIf": payload.get("whatIf") if isinstance(payload.get("whatIf"), dict) else None,
         "tree": {
             "lap": start_lap,
             "ourSoc": round(soc_from_laps(energy_laps, selected, start_lap), 3),
@@ -412,6 +426,7 @@ def rollout_to_finish(payload: dict[str, Any]) -> dict[str, Any]:
             "The rollout is future-blind: later recorded rows are not supplied to the policy.",
             "SoC is a public-data model surrogate, not private battery telemetry.",
             "Only the selected car and its starting attack target are simulated.",
+            "If forcedFirstAction is set, lap 1 of the branch uses that call; later laps return to the policy.",
             "A full-grid finish forecast is intentionally unavailable until pit, tyre, traffic, pace, retirement and race-control models exist.",
         ],
     }

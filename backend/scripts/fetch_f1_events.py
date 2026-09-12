@@ -7,7 +7,7 @@ import fastf1
 from fetch_f1_session import CACHE_DIR, clean, session_names
 
 
-def has_recorded_race_data(year, event_date):
+def has_recorded_race_data(year, round_number, event_date):
     """Check whether this local install has enough cached Race data to replay.
 
     The schedule lists every 2026 round ahead of time. A scheduled event is
@@ -16,6 +16,9 @@ def has_recorded_race_data(year, event_date):
     not try to construct a simulation from a future (or not-yet-ingested)
     event.
     """
+    session_json = CACHE_DIR.parent / 'sessions' / str(year) / f'{int(round_number)}_race.json'
+    if session_json.exists():
+        return True
     if event_date is None:
         return False
     season_dir = CACHE_DIR / str(year)
@@ -57,7 +60,7 @@ def main():
             'sessions': session_names(row),
             # This tells the simulation whether it can load a recorded Race
             # replay, not whether an event merely appears on the calendar.
-            'raceDataAvailable': has_recorded_race_data(args.year, event_date),
+            'raceDataAvailable': has_recorded_race_data(args.year, int(row['RoundNumber']), event_date),
         })
 
     print(json.dumps({'year': args.year, 'events': events}))

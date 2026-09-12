@@ -1,5 +1,6 @@
 import http from 'node:http'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { readFile, readdir, mkdir, writeFile, rename, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -18,6 +19,8 @@ import {
 } from './src/database.mjs'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
+const PYTHON_BIN = process.env.PYTHON_BIN
+  || (existsSync(path.join(root, '.venv/bin/python')) ? path.join(root, '.venv/bin/python') : 'python3')
 const examples = JSON.parse(await readFile(path.join(root, 'data/hf-slice.json'), 'utf8'))
 const nightRaceData = JSON.parse(await readFile(path.join(root, 'data/openf1-2023-night-races.json'), 'utf8'))
 const PORT = Number(process.env.PORT || 8787)
@@ -394,7 +397,7 @@ function f1Slug(sessionName) {
 
 function runPython(script, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn('python', [path.join(root, 'scripts', script), ...args])
+    const child = spawn(PYTHON_BIN, [path.join(root, 'scripts', script), ...args])
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => {
@@ -415,7 +418,7 @@ function runPython(script, args, timeoutMs) {
 
 function runPythonWithInput(script, args, stdinData, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn('python', [path.join(root, 'scripts', script), ...args])
+    const child = spawn(PYTHON_BIN, [path.join(root, 'scripts', script), ...args])
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => {
@@ -911,12 +914,79 @@ export async function handler(request, response) {
       driver: params.get('driver') || undefined,
       defender: params.get('defender') || undefined,
       policy: params.get('policy') || 'AUTO',
+      startSocMj: params.get('startSocMj') ? Number(params.get('startSocMj')) : 4,
     }
     try {
       const out = await runPythonWithInput('clip_cached_race.py', [], JSON.stringify(body), 60000)
       return json(response, 200, JSON.parse(out))
     } catch (error) {
       return json(response, 502, { error: error.message })
+    }
+  }
+
+  // POST /api/f1/recommend — current-lap state only. The trained model uses
+  // prior races; it must not receive later laps of the race being watched.
+  if (request.method === 'POST' && new URL(request.url, 'http://localhost').pathname === '/api/f1/recommend') {
+    let body = {}
+    try {
+      body = await readJsonBody(request)
+    } catch {
+      return json(response, 400, { error: 'JSON body required' })
+    }
+    try {
+      const out = await runPythonWithInput('score_recommend.py', [], JSON.stringify(body), 20000)
+      const payload = JSON.parse(out)
+      return json(response, payload.error ? 503 : 200, payload)
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/strategy-story?year&round&session&driver — start/finish,
+  // observed place changes, missed DRS windows, and historical recipe.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/strategy-story') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const body = {
+      year: params.get('year') ? Number(params.get('year')) : undefined,
+      round: params.get('round') ? Number(params.get('round')) : undefined,
+      session: params.get('session') || 'Race',
+      driver: params.get('driver') || undefined,
+    }
+    try {
+      const out = await runPythonWithInput('score_driver_strategy.py', [], JSON.stringify(body), 60000)
+      const payload = JSON.parse(out)
+      return json(response, payload.error ? 404 : 200, payload)
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/energy-trend?year&round&session&driver — modelled ES trajectory,
+  // DRS/chase/overtake marks, and 2018-2025 leftover-at-overtake trend.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/energy-trend') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const body = {
+      year: params.get('year') ? Number(params.get('year')) : undefined,
+      round: params.get('round') ? Number(params.get('round')) : undefined,
+      session: params.get('session') || 'Race',
+      driver: params.get('driver') || undefined,
+    }
+    try {
+      const out = await runPythonWithInput('score_energy_trend.py', [], JSON.stringify(body), 60000)
+      const payload = JSON.parse(out)
+      return json(response, payload.error ? 404 : 200, payload)
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/recommend-report — random race-level holdout metrics.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/recommend-report') {
+    try {
+      const reportPath = path.join(F1_CACHE_DIR, 'models', 'recommend_report.json')
+      return json(response, 200, JSON.parse(await readFile(reportPath, 'utf8')))
+    } catch {
+      return json(response, 404, { error: 'recommend model not trained yet' })
     }
   }
 

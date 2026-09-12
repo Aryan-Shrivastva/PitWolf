@@ -33,7 +33,7 @@ const memoryCache = new Map()
 // v33 separates the current analysis-row scoring response from older browser
 // sessions that stored an incomplete prediction payload.  Those old payloads
 // made the Strategy page mistake a model-score failure for "no battle".
-const CACHE_PREFIX = 'pitwolf:api:v33:'
+const CACHE_PREFIX = 'pitwolf:api:v41:'
 
 function storageGet(key) {
   try {
@@ -155,7 +155,7 @@ export async function fetchCachedRaces(year) {
   return payload.events ?? []
 }
 
-export function fetchBatteryClip({ year, round, session = 'R', driver, defender, policy = 'AUTO' }) {
+export function fetchBatteryClip({ year, round, session = 'R', driver, defender, policy = 'AUTO', startSocMj = 4 }) {
   const params = new URLSearchParams()
   if (year) params.set('year', year)
   if (round) params.set('round', round)
@@ -163,7 +163,42 @@ export function fetchBatteryClip({ year, round, session = 'R', driver, defender,
   if (driver) params.set('driver', driver)
   if (defender) params.set('defender', defender)
   if (policy) params.set('policy', policy)
+  if (startSocMj != null) params.set('startSocMj', startSocMj)
   return fetchJson(`/api/f1/battery/clip?${params}`)
+}
+
+export function fetchRecommend(body) {
+  return fetch('/api/f1/recommend', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (response) => {
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(payload.error || `recommend failed (${response.status})`)
+    return payload
+  })
+}
+
+export function fetchRecommendReport() {
+  return fetchJson('/api/f1/recommend-report')
+}
+
+export function fetchStrategyStory({ year, round, session = 'R', driver }) {
+  const params = new URLSearchParams()
+  if (year) params.set('year', year)
+  if (round) params.set('round', round)
+  if (session) params.set('session', session)
+  if (driver) params.set('driver', driver)
+  return fetchJson(`/api/f1/strategy-story?${params}`)
+}
+
+export function fetchEnergyTrend({ year, round, session = 'R', driver }) {
+  const params = new URLSearchParams()
+  if (year) params.set('year', year)
+  if (round) params.set('round', round)
+  if (session) params.set('session', session)
+  if (driver) params.set('driver', driver)
+  return fetchJson(`/api/f1/energy-trend?${params}`)
 }
 
 // Strategy accent colours, kept identical to the rule engine so the rebuilt

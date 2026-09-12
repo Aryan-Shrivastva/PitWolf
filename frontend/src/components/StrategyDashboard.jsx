@@ -14,7 +14,7 @@ import {
   DEFAULT_START_RESERVE_PCT,
 } from '../lib/energyModel'
 import { recommend, feasibilityScore, STRATEGIES, DECISION_ENGINE_VERSION } from '../lib/decisionEngine'
-import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab, ValidationTab } from './DecisionTabs'
+import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab, ValidationTab, TelemetryIncidentBoard } from './DecisionTabs'
 
 const tabs = ['TRACK', 'TELEMETRY', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'VALIDATION']
 
@@ -135,7 +135,7 @@ function DataBadge({ children, tone = 'real' }) {
   return <span className={`data-badge ${tone}`}><i />{children}</span>
 }
 
-export function StrategyDashboard({ onHome }) {
+export function StrategyDashboard({ onHome, onOpenSimulation }) {
   const [tab, setTab] = useState('STRATEGY')
   const [telemetryLaps, setTelemetryLaps] = useState([])
   const [explorerSel, setExplorerSel] = useState(null)
@@ -222,7 +222,14 @@ export function StrategyDashboard({ onHome }) {
         <b>{meta.event_date.slice(0, 4)} {meta.event.toUpperCase()}</b>
         <span>{meta.session.toUpperCase()} / LAP {meta.focus_lap} OF {meta.total_laps} / {meta.circuit.toUpperCase()}</span>
       </div>
-      <div className="ov-header-right"><DataBadge tone="real">FASTF1 {meta.fastf1_version}</DataBadge><button className="ov-menu">☰</button></div>
+      <div className="ov-header-right">
+        <DataBadge tone="real">FASTF1 {meta.fastf1_version}</DataBadge>
+        {onOpenSimulation && <button type="button" className="ov-sim-link" onClick={() => onOpenSimulation({
+          year: raceSel.year, round: raceSel.round, session: raceSel.session === 'R' ? 'Race' : raceSel.session,
+          driver: raceSel.driver, lap: Number(selectedContextLap) || 1,
+        })}>SIMULATION ↗</button>}
+        <button className="ov-menu">☰</button>
+      </div>
     </header>
 
     <section className="ov-toolbar">
@@ -252,7 +259,7 @@ export function StrategyDashboard({ onHome }) {
         </div>
       </div>
 
-      {['STRATEGY', 'ENERGY', 'OVERTAKE'].includes(tab) && (
+      {['STRATEGY', 'ENERGY', 'OVERTAKE', 'TELEMETRY'].includes(tab) && (
         <RaceSelector sel={raceSel} onChange={setRaceSel} drivers={engine.drivers} events={engine.events} />
       )}
 
@@ -329,10 +336,19 @@ export function StrategyDashboard({ onHome }) {
       />
       </>}
 
-      {tab === 'TELEMETRY' && <TelemetryCompare selectedLaps={telemetryLaps} onLapsChange={setTelemetryLaps} />}
+      {tab === 'TELEMETRY' && (
+        <>
+          <TelemetryIncidentBoard
+            sel={raceSel}
+            onLoadLaps={(laps) => setTelemetryLaps(laps)}
+            onOpenSimulation={onOpenSimulation}
+          />
+          <TelemetryCompare selectedLaps={telemetryLaps} onLapsChange={setTelemetryLaps} />
+        </>
+      )}
 
       {tab === 'ENERGY' && (
-        <EnergyTab sel={raceSel} energy={engine.energy} />
+        <EnergyTab sel={raceSel} energy={engine.energy} onOpenSimulation={onOpenSimulation} />
       )}
 
       {tab === 'OVERTAKE' && (

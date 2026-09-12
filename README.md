@@ -57,6 +57,8 @@ P(t) = m * a(t) * v(t)
 
 The system projects computed demand onto the 2026 power-unit split, applies the relevant deployment rules, accumulates energy across the lap, and checks it against the published per-track ceiling. Where public data does not expose battery state or complete power-unit measurements, assumptions must be documented clearly. Physical plausibility must not be presented as exact battery telemetry.
 
+When the remaining battery parts are implemented, overtake and save scoring must follow **[BATTERY.md](BATTERY.md)**: selected-driver modelled SoC plus a `0…1` randomness term raise or lower overtake probability, then ATTACK / SAVE use that adjusted percentage.
+
 ## Validation
 
 PitWolf should be evaluated on:
