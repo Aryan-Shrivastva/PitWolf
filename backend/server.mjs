@@ -873,9 +873,35 @@ export async function handler(request, response) {
     }
   }
 
+  // GET /api/f1/cached-races?year — races already sitting in the session cache
+  // so the dashboard dropdown can select them without a CLI command.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/cached-races') {
+    const year = new URL(request.url, 'http://localhost').searchParams.get('year') || ''
+    if (!/^\d{4}$/.test(year)) return json(response, 400, { error: 'year is required' })
+    const dir = path.join(F1_CACHE_DIR, 'sessions', year)
+    const events = []
+    try {
+      for (const file of await readdir(dir)) {
+        const match = file.match(/^(\d+)_race\.json$/)
+        if (!match) continue
+        try {
+          const payload = JSON.parse(await readFile(path.join(dir, file), 'utf8'))
+          const drivers = (payload.drivers || []).map((item) => item.abbr).filter(Boolean)
+          events.push({
+            round: Number(match[1]),
+            name: payload.event?.name || `Round ${match[1]}`,
+            drivers,
+          })
+        } catch { /* skip unreadable cache entry */ }
+      }
+    } catch { /* no sessions cached for this year */ }
+    events.sort((a, b) => a.round - b.round)
+    return json(response, 200, { year, events })
+  }
+
   // GET /api/f1/battery/clip?year&round&session&driver&defender — C5.2 clip
   // against an already-fetched session JSON. Omit year/round to use the first
-  // cached race on disk. Frontend unchanged.
+  // cached race on disk.
   if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/battery/clip') {
     const params = new URL(request.url, 'http://localhost').searchParams
     const body = {

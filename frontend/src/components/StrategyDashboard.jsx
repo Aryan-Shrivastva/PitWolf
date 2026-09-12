@@ -144,7 +144,7 @@ export function StrategyDashboard({ onHome }) {
   const focus = DEFAULT_FOCUS
   const [strategy, setStrategy] = useState('ATTACK')
   const [drsOverride, setDrsOverride] = useState(null)
-  const [raceSel, setRaceSel] = useState({ year: 2023, round: 21, session: 'R', driver: 'LEC' })
+  const [raceSel, setRaceSel] = useState({ year: 2026, round: 1, session: 'R', driver: 'RUS' })
   const engine = useRaceEngine(raceSel, tab)
   // Strategy/Energy/Overtake must describe the selected cached race, not the
   // decorative home-screen scenario. A selected driver may have no close

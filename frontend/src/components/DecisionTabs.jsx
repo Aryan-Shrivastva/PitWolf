@@ -6,6 +6,8 @@ import {
   fetchEvents,
   predictOvertake,
   fetchStrategyReplay,
+  fetchCachedRaces,
+  fetchBatteryClip,
   STRATEGY_COLORS,
   STRATEGY_ORDER,
 } from '../lib/f1api'
@@ -229,8 +231,46 @@ export function RaceSelector({ sel, onChange, drivers, events }) {
         {(drivers?.length ? drivers : [sel.driver]).map((d) => <option key={d} value={d}>{d}</option>)}
       </select>
     </label>
-    <div className="ov-toolbar-note"><span>DATA</span><b>{events?.length ? `${events.length} RACES CACHED` : 'RACE CACHE'}</b></div>
+    <div className="ov-toolbar-note"><span>DATA</span><b>{events?.length ? `${events.length} RACES IN DROPDOWN` : 'PICK A CACHED RACE'}</b></div>
   </div>
+}
+
+function CachedBatteryClip({ sel }) {
+  const [clip, setClip] = useState({ loading: false })
+  useEffect(() => {
+    if (!sel?.year || !sel?.round) return undefined
+    let live = true
+    setClip({ loading: true })
+    fetchBatteryClip({
+      year: sel.year,
+      round: sel.round,
+      session: sel.session,
+      driver: sel.driver,
+    }).then((data) => { if (live) setClip({ data }) })
+      .catch((error) => { if (live) setClip({ error: error.message }) })
+    return () => { live = false }
+  }, [sel.year, sel.round, sel.session, sel.driver])
+
+  const data = clip.data
+  const box = data?.box
+  const actual = data?.actualRace
+  return <section className="ov-panel dt-clip-panel">
+    <div className="ov-panel-head">
+      <span>C5.2 BATTERY CLIP / SELECTED RACE</span>
+      <Badge tone="simulated">MODELLED ES · REAL LAP TIMES</Badge>
+    </div>
+    {clip.loading && <div className="lx-loading"><span className="lx-spinner" />CLIPPING CACHED LAPS…</div>}
+    {clip.error && <p className="lx-empty">This race is not in the session cache yet, or the backend on :8787 is the old process. {clip.error}</p>}
+    {data && !clip.loading && <>
+      <div className="dt-clip-box">
+        <div><span>USED</span><b>{box?.consumedMj ?? '—'} MJ</b></div>
+        <div><span>LEFT</span><b>{box?.leftMj ?? '—'} MJ · {box?.leftPct ?? '—'}%</b></div>
+        <div><span>PAIR</span><b>{actual?.driver} vs {actual?.defender}</b></div>
+        <div><span>LAPS</span><b>{actual?.sharedTimedLaps ?? '—'}</b></div>
+      </div>
+      <p className="ov-notes">{data.call}</p>
+    </>}
+  </section>
 }
 
 // ─── Data hook: decision points + ML predictions + energy race ───────────────
@@ -260,9 +300,18 @@ export function useRaceEngine(sel, activeTab = 'STRATEGY') {
     }
     let live = true
     setEvents([])
-    fetchEvents(sel.year)
-      .then((list) => { if (live) setEvents(list) })
-      .catch(() => { if (live) setEvents([]) })
+    Promise.all([
+      fetchEvents(sel.year).catch(() => []),
+      fetchCachedRaces(sel.year).catch(() => []),
+    ]).then(([rounds, cached]) => {
+      if (!live) return
+      const byRound = new Map()
+      for (const item of [...rounds, ...cached]) {
+        const prev = byRound.get(Number(item.round)) || { round: Number(item.round) }
+        byRound.set(Number(item.round), { ...prev, ...item })
+      }
+      setEvents([...byRound.values()].sort((a, b) => a.round - b.round))
+    }).catch(() => { if (live) setEvents([]) })
     return () => { live = false }
   }, [sel.year, needsEvents])
 
@@ -334,8 +383,10 @@ export function useRaceEngine(sel, activeTab = 'STRATEGY') {
     ;(decision.data?.participants ?? []).forEach((driver) => set.add(driver))
     Object.keys(decision.data?.finishPositions ?? {}).forEach((driver) => set.add(driver))
     rows.forEach((r) => { if (r.driver) set.add(r.driver); if (r.defender) set.add(r.defender) })
+    const cached = events.find((item) => Number(item.round) === Number(sel.round))
+    ;(cached?.drivers ?? []).forEach((driver) => set.add(driver))
     return [...set].sort()
-  }, [decision.data])
+  }, [decision.data, events, sel.round])
 
   return { decision, energy, preds, drivers, report, events }
 }
@@ -862,6 +913,7 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
   if (decision.loading) return <div className="lx-loading"><span className="lx-spinner" />BUILDING FUSED DECISION…</div>
   if (rows.length && (preds?.loading || !preds)) return <div className="lx-loading"><span className="lx-spinner" />SCORING DETECTED BATTLES</div>
   if (!focus) return <div className="dt-strategy">
+    <CachedBatteryClip sel={sel} />
     {preds?.error && selectedDriverHasSourceRows
       ? <p className="lx-empty"><b>RACE TIMING IS LOADED; MODEL SCORING DID NOT COMPLETE.</b> {sel.driver} has extracted close-battle points in this race, but the classifier request failed: {preds.error}. Retry the page; this is not a “no battle” result.</p>
       : <p className="lx-empty"><b>RACE TIMING IS LOADED.</b> No close-battle model decision point was extracted for {sel.driver} in this race, so there is no ATTACK / SAVE / DELAY recommendation to display. The observed starting position, final classification, and position movements are shown below; these are timing movements, not confirmed overtakes.</p>}
@@ -887,6 +939,7 @@ export function StrategyTab({ sel, decision, preds, energy, onSelectDriver }) {
   const trainingExclusions = (focus.exclusionReasons ?? []).join(', ').replaceAll('_', ' ').toLowerCase()
 
   return <div className="dt-strategy">
+    <CachedBatteryClip sel={sel} />
     <div className="ov-alert" style={{ borderLeftColor: STRATEGY_COLORS[rec], background: `${STRATEGY_COLORS[rec]}14` }}>
       <span style={{ color: STRATEGY_COLORS[rec] }}>◆</span>
       <div>

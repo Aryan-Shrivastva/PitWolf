@@ -22,11 +22,20 @@ from ai_energy_rollout import rollout
 from fetch_f1_session import CACHE_DIR
 
 SESSIONS = CACHE_DIR.parent / 'sessions'
+SESSION_ALIASES = {
+    'r': 'race', 'q': 'qualifying', 's': 'sprint', 'sq': 'sprint_qualifying',
+    'ss': 'sprint_shootout', 'p': 'practice_1', 'fp1': 'practice_1',
+    'fp2': 'practice_2', 'fp3': 'practice_3',
+}
+
+
+def session_slug(session_name: str) -> str:
+    raw = (session_name or 'Race').lower().replace(' ', '_')
+    return SESSION_ALIASES.get(raw, raw)
 
 
 def session_path(year: int, round_number: int, session_name: str = 'Race') -> Path:
-    slug = session_name.lower().replace(' ', '_')
-    return SESSIONS / str(year) / f'{round_number}_{slug}.json'
+    return SESSIONS / str(year) / f'{round_number}_{session_slug(session_name)}.json'
 
 
 def first_cached_race() -> Path | None:
@@ -54,6 +63,13 @@ def pick_pair(payload: dict, driver: str | None, defender: str | None) -> tuple[
     )
     if driver and defender:
         return driver.upper(), defender.upper()
+    if driver:
+        code = driver.upper()
+        index = next((i for i, item in enumerate(classified) if item['abbr'] == code), None)
+        if index is None and classified:
+            return classified[0]['abbr'], classified[1]['abbr']
+        neighbour = classified[index + 1] if index is not None and index + 1 < len(classified) else classified[index - 1]
+        return code, neighbour['abbr']
     if len(classified) < 2:
         raise SystemExit(json.dumps({'error': 'need two classified drivers in the cached race'}))
     return classified[0]['abbr'], classified[1]['abbr']

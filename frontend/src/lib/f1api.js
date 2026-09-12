@@ -150,6 +150,22 @@ export async function fetchEvents(year) {
   return payload.events ?? []
 }
 
+export async function fetchCachedRaces(year) {
+  const payload = await fetchJson(`/api/f1/cached-races?year=${year}`)
+  return payload.events ?? []
+}
+
+export function fetchBatteryClip({ year, round, session = 'R', driver, defender, policy = 'AUTO' }) {
+  const params = new URLSearchParams()
+  if (year) params.set('year', year)
+  if (round) params.set('round', round)
+  if (session) params.set('session', session)
+  if (driver) params.set('driver', driver)
+  if (defender) params.set('defender', defender)
+  if (policy) params.set('policy', policy)
+  return fetchJson(`/api/f1/battery/clip?${params}`)
+}
+
 // Strategy accent colours, kept identical to the rule engine so the rebuilt
 // pages preserve the PitWolf palette (ATTACK orange / SAVE teal / DELAY blue).
 export const STRATEGY_COLORS = {
