@@ -873,6 +873,27 @@ export async function handler(request, response) {
     }
   }
 
+  // GET /api/f1/battery/clip?year&round&session&driver&defender — C5.2 clip
+  // against an already-fetched session JSON. Omit year/round to use the first
+  // cached race on disk. Frontend unchanged.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/battery/clip') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const body = {
+      year: params.get('year') ? Number(params.get('year')) : undefined,
+      round: params.get('round') ? Number(params.get('round')) : undefined,
+      session: params.get('session') || 'Race',
+      driver: params.get('driver') || undefined,
+      defender: params.get('defender') || undefined,
+      policy: params.get('policy') || 'AUTO',
+    }
+    try {
+      const out = await runPythonWithInput('clip_cached_race.py', [], JSON.stringify(body), 60000)
+      return json(response, 200, JSON.parse(out))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
   // GET /api/f1/decisionpoints?year&round&session — pre-extracted overtake
   // decision points for a race, each labelled ATTACK/DELAY/SAVE. Served straight
   // from the batch-extracted cache (no fetch), so it is instant.

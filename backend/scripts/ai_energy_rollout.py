@@ -54,9 +54,15 @@ def choose_action(row: dict[str, Any], soc_mj: float, policy: str) -> tuple[str,
     if str(policy).upper() in {'ATTACK', 'SAVE', 'DELAY'}:
         return str(policy).upper(), 'fixed policy for the whole rollout'
 
-    base = observed_action(row)
     gap = _num(row.get('gapS'), 1.2)
+    closing = _num(row.get('closingRateS'))
     legal_kw = _num((row.get('legal') or {}).get('legalDeployKw'), 1.0)
+    # Signed gap from cached race time: >0 we are behind, <0 we are already ahead.
+    if gap < 0:
+        if closing < -0.12 and soc_mj >= MIN_DELAY_SOC_MJ:
+            return 'DELAY', f'ahead by {abs(gap):.2f}s but losing time; hold energy to defend'
+        return 'SAVE', f'ahead by {abs(gap):.2f}s on actual race time; harvest, do not push'
+    base = observed_action(row)
     if base == 'ATTACK' and soc_mj < MIN_ATTACK_SOC_MJ:
         return 'SAVE', f'wanted ATTACK but modelled SoC {soc_mj:.2f} MJ is below {MIN_ATTACK_SOC_MJ} MJ floor'
     if base == 'DELAY' and soc_mj < MIN_DELAY_SOC_MJ:
@@ -64,8 +70,8 @@ def choose_action(row: dict[str, Any], soc_mj: float, policy: str) -> tuple[str,
     if base == 'ATTACK' and legal_kw <= 0:
         return 'DELAY', 'C5.2.8 speed cut — wait for a slower sector before pushing'
     if gap > 1.2:
-        return 'SAVE', 'gap outside the close-battle window; harvest under the 8.5 MJ lap cap'
-    return base, f'AUTO from gap {_num(row.get("gapS"), 1.2):.2f}s and closing {_num(row.get("closingRateS")):.2f}s/lap'
+        return 'SAVE', 'behind but outside the close-battle window; harvest under the 8.5 MJ lap cap'
+    return base, f'AUTO from actual gap {gap:.2f}s behind and closing {closing:.2f}s/lap'
 
 
 def pass_possible(row: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
@@ -73,6 +79,12 @@ def pass_possible(row: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
     closing = _num(row.get('closingRateS'))
     speed_cut = bool(step['legal']['speedCut'])
     enough = step['socEndMj'] >= MIN_ATTACK_SOC_MJ or step['action'] != 'ATTACK'
+    if gap < 0:
+        return {
+            'verdict': 'ALREADY AHEAD',
+            'proof': f'Actual cumulative race time is {abs(gap):.2f}s quicker than the other car.',
+            'immediate': False,
+        }
     immediate = gap <= 0.85 and closing >= 0.12 and not speed_cut and step['consumedMj'] > 0
     later = gap <= 1.2 and not speed_cut and step['socEndMj'] >= MIN_DELAY_SOC_MJ
     if speed_cut:
