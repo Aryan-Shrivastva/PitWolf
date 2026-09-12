@@ -1,0 +1,19 @@
+.te-optimum-select {
+  display: grid;
+  gap: 5px;
+  margin-top: 15px;
+  padding-top: 11px;
+  border-top: 1px solid rgba(225, 255, 245, .14);
+}
+
+.te-optimum-select span { font-size: 7px; }
+
+.te-optimum-select select {
+  width: 100%;
+  border: 1px solid rgba(169, 191, 255, .34);
+  padding: 8px;
+  color: #e8f5f0;
+  background: #101d21;
+  outline: 0;
+  font: 600 11px 'Space Grotesk';
+}
