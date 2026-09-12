@@ -1,0 +1,24 @@
+.te-map-stage{position:relative}
+.glh-root{position:absolute;inset:18px 18px 16px;pointer-events:none;z-index:2}
+.glh-left,.glh-right,.glh-controls{position:absolute;display:grid;gap:6px}
+.glh-left{top:0;left:0;gap:1px;border:1px solid rgba(196,222,212,.26);background:rgba(5,13,14,.9);min-width:186px}
+.glh-left>div{padding:10px 12px}
+.glh-left>div+div{border-top:1px solid rgba(196,222,212,.13)}
+.glh-right{top:0;right:0;min-width:210px;border:1px solid rgba(196,222,212,.26);background:rgba(5,13,14,.9);gap:0}
+.glh-energy-state,.glh-battery{padding:12px 14px}
+.glh-battery{border-top:1px solid rgba(196,222,212,.18);display:grid;gap:6px}
+.glh-root span,.glh-root em{color:#8ca39b;font:8px 'DM Mono';font-style:normal;letter-spacing:.08em}
+.glh-root b{color:#f0fbf6;font:600 20px/1 'Space Grotesk';letter-spacing:-.05em}
+.glh-left b{display:block;margin:4px 0}
+.glh-energy-state>b{display:block;margin:5px 0;color:#57d9b0;font-size:16px}
+.glh-battery-reading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.glh-battery-reading b{color:#a9bfff;font-size:18px}
+.glh-battery-reading em{color:#b6cdc4;white-space:nowrap}
+.glh-battery-track{height:6px;overflow:hidden;border:1px solid rgba(169,191,255,.32);background:rgba(169,191,255,.08)}
+.glh-battery-track i{display:block;height:100%;background:linear-gradient(90deg,#57d9b0,#a9bfff);box-shadow:0 0 8px rgba(169,191,255,.55);transition:width 80ms linear}
+.glh-controls{left:0;bottom:0;pointer-events:auto;grid-template-columns:auto auto auto;align-items:end}
+.glh-controls>div{display:flex}
+.glh-controls button{padding:7px 9px;border:1px solid rgba(225,255,245,.18);background:rgba(8,20,20,.94);color:#bdd2ca;font:8px 'DM Mono';letter-spacing:.05em;cursor:pointer}
+.glh-controls button+button{margin-left:-1px}
+.glh-controls button.active{position:relative;z-index:1;border-color:#ff7043;background:rgba(255,112,67,.14);color:#ffb190}
+@media(max-width:720px){.glh-root{inset:10px}.glh-left{min-width:145px}.glh-right{min-width:150px}.glh-root b{font-size:15px}.glh-energy-state>b{font-size:12px}.glh-battery-reading b{font-size:15px}.glh-battery-reading{display:grid;gap:3px}.glh-controls{grid-template-columns:1fr 1fr;gap:4px}.glh-controls>div{grid-column:1/-1}}

@@ -4,16 +4,38 @@ import '../lapexplorer.css'
 
 const YEARS = [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018]
 const FALLBACK_COLOR = '#71867e'
+const JSON_CACHE_LIMIT = 180
+const jsonRequestCache = new Map()
 
 export async function fetchJson(url) {
-  const response = await fetch(url)
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(payload.error || `request failed (${response.status})`)
-    error.status = response.status
+  // The dashboard mounts adjacent pages independently. Keep both pending and
+  // completed GETs in one short-lived browser cache so Team Lap, Optimal Lap
+  // and Telemetry do not repeatedly parse the same FastF1 response.
+  const cached = jsonRequestCache.get(url)
+  if (cached) return cached
+
+  const request = (async () => {
+    const response = await fetch(url)
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const error = new Error(payload.error || `request failed (${response.status})`)
+      error.status = response.status
+      throw error
+    }
+    return payload
+  })()
+
+  jsonRequestCache.set(url, request)
+  if (jsonRequestCache.size > JSON_CACHE_LIMIT) {
+    jsonRequestCache.delete(jsonRequestCache.keys().next().value)
+  }
+  try {
+    return await request
+  } catch (error) {
+    // Errors must never become sticky: retries should always reach the API.
+    if (jsonRequestCache.get(url) === request) jsonRequestCache.delete(url)
     throw error
   }
-  return payload
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

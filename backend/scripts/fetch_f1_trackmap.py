@@ -18,7 +18,12 @@ def visual_reference(year, round_number, session_name):
     """Read the user's turn-range maps without promoting them to FIA data."""
     try:
         evidence = json.loads(VISUAL_EVIDENCE_PATH.read_text(encoding='utf8'))
-        return evidence.get('events', {}).get(f'{year}:{round_number}:{session_name.lower()}')
+        events = evidence.get('events', {})
+        # The supplied maps are circuit ranges entered under race keys. The
+        # user applies those same ranges to qualifying battery use; this
+        # remains a user scenario policy, not a FIA session-specific map.
+        return (events.get(f'{year}:{round_number}:{session_name.lower()}')
+                or events.get(f'{year}:{round_number}:r'))
     except Exception:
         return None
 

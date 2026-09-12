@@ -18,6 +18,7 @@ import fastf1
 import numpy as np
 
 from energy_model import ASSUMPTIONS, compute_lap_energy
+from fia_compliance import event_context, recharge_ceiling_mj, regulation_payload
 from fetch_f1_session import CACHE_DIR, td_s
 import fia_2026_regs as regs
 
@@ -47,6 +48,7 @@ def build_race_energy_payload(year, round_number, session_name, driver):
     weather_data = session.weather_data
     total_laps = session.total_laps or int(laps['LapNumber'].max())
     soc_window = regs.CONSTANTS['es_soc_window_mj']['value']
+    compliance = event_context(year, round_number, session_name)
 
     soc = 0.7 * soc_window
     lap_rows = []
@@ -84,10 +86,13 @@ def build_race_energy_payload(year, round_number, session_name, driver):
                 'distance': tel['Distance'].to_numpy(dtype=float),
             },
             year=year,
+            round_number=round_number,
+            session_name=session_name,
             lap_fraction=lap_fraction,
             weather=weather,
             soc_start_mj=soc,
             high_speed_kph=high_speed_kph,
+            compliance_context=compliance,
         )
         summary = result['summary']
 
@@ -118,12 +123,8 @@ def build_race_energy_payload(year, round_number, session_name, driver):
         harvest_hs_mj += summary['harvestHighSpeedMj']
         harvest_all_mj += summary['harvestMj']
 
-    harvest_cap = regs.CONSTANTS['harvest_max_mj_per_lap']['value']
+    harvest_cap = recharge_ceiling_mj(compliance)
     uses_2026_rules = int(year) >= 2026
-    regulation_status = (
-        'FIA_DEFAULTS_EVENT_APPENDIX_REQUIRED'
-        if uses_2026_rules else 'HISTORICAL_SURROGATE_NOT_2026_COMPLIANCE'
-    )
     gates = {
         'zoneAlignment': {
             'deployAtFullThrottlePct': round(100.0 * deploy_ft_mj / deploy_all_mj, 1) if deploy_all_mj else None,
@@ -140,11 +141,10 @@ def build_race_energy_payload(year, round_number, session_name, driver):
             'socWindowMj': soc_window,
             'pass': bool(harvests) and float(np.max(harvests)) <= harvest_cap + 1e-6
                     and float(np.max(np.abs(swings))) <= soc_window + 1e-6,
-            'eventSpecificLimitLoaded': False,
+            'eventSpecificLimitLoaded': compliance['eventSpecificDataLoaded'],
             'description': (
-                'Global FIA 2026 Recharge ceiling (Technical C5.2.10) and 4 MJ SoC window '
-                '(Technical C5.2.9). This is not an event-compliance result: the FIA may '
-                'publish a lower Competition Recharge limit or circuit power curve.'
+                'C5.2.10 Recharge ceiling and C5.2.9 SoC window. This is an event-compliance '
+                'result only when the official B7.2 Competition configuration is loaded.'
                 if uses_2026_rules else
                 'A modelled 2026-envelope sanity check only. Historical seasons require their own '
                 'era-specific regulation configuration before any compliance claim.'
@@ -162,18 +162,10 @@ def build_race_energy_payload(year, round_number, session_name, driver):
     return {
         'label': 'MODELLED',
         'regulation': {
-            'status': regulation_status,
+            **regulation_payload(compliance),
             'uses2026Defaults': uses_2026_rules,
             'technicalSource': regs.REGULATION_VERSION['technical_c'],
             'sportingSource': regs.REGULATION_VERSION['sporting_b'],
-            'eventSpecificLimitsLoaded': False,
-            'note': (
-                'The trace is constrained by published global 2026 ceilings. It does not claim '
-                'Competition-specific Overtake, Recharge or power-curve compliance until the FIA '
-                'event configuration is loaded.'
-                if uses_2026_rules else
-                'Historical trace uses a modelled surrogate and is not a claim of 2026 FIA compliance.'
-            ),
         },
         'driver': driver,
         'year': year,
