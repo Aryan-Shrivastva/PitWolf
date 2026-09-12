@@ -475,6 +475,18 @@ async function f1CachedOrFetch(cacheRel, script, args, timeoutMs) {
   }
 }
 
+async function cachedRaceSessionRounds(year) {
+  // The calendar payload is cached independently from individual sessions.
+  // When a new Race session is fetched after an event, reflect that straight
+  // away instead of waiting for the annual event-list cache to be rebuilt.
+  const directory = path.join(F1_CACHE_DIR, 'sessions', String(year))
+  const entries = await readdir(directory).catch(() => [])
+  return new Set(entries
+    .map((entry) => entry.match(/^(\d+)_race\.json$/)?.[1])
+    .filter(Boolean)
+    .map(Number))
+}
+
 // ─── HTTP body helpers ─────────────────────────────────────────────────────────
 
 async function readJsonBody(request) {
@@ -685,7 +697,13 @@ export async function handler(request, response) {
     try {
       // v2 distinguishes scheduled events from rounds that actually have the
       // cached timing/position data required by the recorded replay.
-      return json(response, 200, await f1CachedOrFetch(`events/v3/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000))
+      const payload = await f1CachedOrFetch(`events/v3/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000)
+      const cachedRounds = await cachedRaceSessionRounds(year)
+      const events = (payload.events ?? []).map((event) => ({
+        ...event,
+        raceDataAvailable: Boolean(event.raceDataAvailable || cachedRounds.has(Number(event.round))),
+      }))
+      return json(response, 200, { ...payload, events })
     } catch (error) {
       return json(response, 502, { error: error.message })
     }
@@ -787,8 +805,47 @@ export async function handler(request, response) {
       return json(response, 400, { error: 'year, round, session, driver and lap are required' })
     }
     try {
-      const cacheRel = `energy/${year}/${round}_${f1Slug(session)}/${driver}_${lap}.json`
+      // v2 applies session-aware C4 mass, C5.2.21's fixed conversion
+      // correction and the explicit B7.2 event-compliance status.
+      const cacheRel = `energy/v12/${year}/${round}_${f1Slug(session)}/${driver}_${lap}.json`
       return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_energy.py', ['--year', year, '--round', round, '--session', session, '--driver', driver, '--lap', lap], 300000))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // GET /api/f1/qualifying-pace/status?year — exposes dataset coverage and
+  // the model gate without serving a partial pace baseline as an optimiser.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/qualifying-pace/status') {
+    const year = new URL(request.url, 'http://localhost').searchParams.get('year') || ''
+    if (!/^\d{4}$/.test(year)) return json(response, 400, { error: 'year is required' })
+    try {
+      const report = JSON.parse(await readFile(path.join(F1_CACHE_DIR, 'models', `qualifying_pace_report_${year}_v1.json`), 'utf8'))
+      return json(response, 200, report)
+    } catch {
+      return json(response, 200, {
+        status: 'FEATURE_DATASET_NOT_BUILT', deploymentEligible: false,
+        coverage: { completedQualifyingSessions: 0, sessionsWithTelemetry: 0, usableTelemetryRows: 0 },
+      })
+    }
+  }
+
+  // GET /api/f1/optimal-lap?year&round&driver&lap — 2026 qualifying
+  // calibration plus a regulation-bounded, modelled energy optimisation.
+  if (request.method === 'GET' && new URL(request.url, 'http://localhost').pathname === '/api/f1/optimal-lap') {
+    const params = new URL(request.url, 'http://localhost').searchParams
+    const year = params.get('year') || ''
+    const round = params.get('round') || ''
+    const driver = (params.get('driver') || '').toUpperCase()
+    const lap = params.get('lap') || ''
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(round) || !/^[A-Z]{3}$/.test(driver) || !/^\d{1,3}$/.test(lap)) {
+      return json(response, 400, { error: 'year, round, driver and lap are required' })
+    }
+    try {
+        // v3 uses the FIA compliance layer. Keep older calibration outputs
+        // isolated so they cannot be served as current energy traces.
+        const cacheRel = `optimal/v12/${year}/${round}_qualifying_${driver}_${lap}.json`
+      return json(response, 200, await f1CachedOrFetch(cacheRel, 'train_qualifying_optimum.py', ['--year', year, '--round', round, '--driver', driver, '--lap', lap], 300000))
     } catch (error) {
       return json(response, 502, { error: error.message })
     }
@@ -806,10 +863,8 @@ export async function handler(request, response) {
       return json(response, 400, { error: 'year, round, session and driver are required' })
     }
     try {
-      // v2 removes the old pit-charge behaviour and uses the shared energy
-      // transition metadata. Keep it in a new cache namespace so old traces
-      // cannot be served as if they were current.
-      const cacheRel = `energyrace/v2/${year}/${round}_${f1Slug(session)}/${driver}.json`
+      // v3 additionally applies the explicit FIA event-compliance context.
+      const cacheRel = `energyrace/v5/${year}/${round}_${f1Slug(session)}/${driver}.json`
       return json(response, 200, await f1CachedOrFetch(cacheRel, 'fetch_f1_energy_race.py', ['--year', year, '--round', round, '--session', session, '--driver', driver], 600000))
     } catch (error) {
       return json(response, 502, { error: error.message })

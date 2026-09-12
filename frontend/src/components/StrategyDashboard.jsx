@@ -4,6 +4,7 @@ import { formatLapTime } from './CircuitMap'
 import { LapExplorer, fetchJson } from './LapExplorer'
 import { TrackRaceMap } from './TrackRaceMap'
 import { TelemetryCompare } from './TelemetryCompare'
+import { OptimalLapPage, TeamLapPage, useTeamEnergyWorkspace } from './TeamEnergyViews'
 import {
   computeEnergyTrace,
   attackCostMj,
@@ -16,7 +17,7 @@ import {
 import { recommend, feasibilityScore, STRATEGIES, DECISION_ENGINE_VERSION } from '../lib/decisionEngine'
 import { RaceSelector, useRaceEngine, StrategyTab, EnergyTab, OvertakeTab, ValidationTab, TelemetryIncidentBoard } from './DecisionTabs'
 
-const tabs = ['TRACK', 'TELEMETRY', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'VALIDATION']
+const tabs = ['TRACK', 'TELEMETRY', 'TEAM LAP', 'OPTIMAL LAP', 'STRATEGY', 'ENERGY', 'OVERTAKE', 'VALIDATION']
 
 const { meta, attacker, defender, distance_m: distance, derived } = scenario
 const atk = scenario.attacker_telemetry
@@ -145,6 +146,8 @@ export function StrategyDashboard({ onHome, onOpenSimulation }) {
   const [strategy, setStrategy] = useState('ATTACK')
   const [drsOverride, setDrsOverride] = useState(null)
   const [raceSel, setRaceSel] = useState({ year: 2026, round: 1, session: 'R', driver: 'RUS' })
+  const teamEnergy = useTeamEnergyWorkspace(tab === 'TEAM LAP' || tab === 'OPTIMAL LAP')
+  const isLapEnergyWorkspace = tab === 'TEAM LAP' || tab === 'OPTIMAL LAP'
   const engine = useRaceEngine(raceSel, tab)
   // Strategy/Energy/Overtake must describe the selected cached race, not the
   // decorative home-screen scenario. A selected driver may have no close
@@ -218,10 +221,6 @@ export function StrategyDashboard({ onHome, onOpenSimulation }) {
         <strong>PIT<em>WOLF</em></strong>
         <small>RACE STRATEGY INTELLIGENCE</small>
       </button>
-      <div className="ov-header-center">
-        <b>{meta.event_date.slice(0, 4)} {meta.event.toUpperCase()}</b>
-        <span>{meta.session.toUpperCase()} / LAP {meta.focus_lap} OF {meta.total_laps} / {meta.circuit.toUpperCase()}</span>
-      </div>
       <div className="ov-header-right">
         <DataBadge tone="real">FASTF1 {meta.fastf1_version}</DataBadge>
         {onOpenSimulation && <button type="button" className="ov-sim-link" onClick={() => onOpenSimulation({
@@ -232,30 +231,22 @@ export function StrategyDashboard({ onHome, onOpenSimulation }) {
       </div>
     </header>
 
-    <section className="ov-toolbar">
-      <div className="ov-select"><span>ATTACKER</span><b>{attacker.name.toUpperCase()}</b><i>{attacker.team}</i></div>
-      <div className="ov-select"><span>DEFENDER</span><b>{defender.name.toUpperCase()}</b><i>{defender.team}</i></div>
-      <div className="ov-select"><span>SCENARIO</span><b>{meta.title.toUpperCase()}</b><i>P{defender.finish_position} → P{attacker.finish_position}</i></div>
-      <div className="ov-toolbar-note"><span>SOURCE</span><b>{meta.source.toUpperCase()}</b></div>
-    </section>
-
     <nav className="ov-tabs">
       {tabs.map((item) => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>
         {item === 'TELEMETRY' && telemetryLaps.length ? `TELEMETRY · ${telemetryLaps.length} LAP${telemetryLaps.length === 1 ? '' : 'S'}` : item}
       </button>)}
-      <span className="ov-tab-caveat">Cached {meta.event_date} session · every value labelled by source</span>
     </nav>
 
     <section className="ov-content">
       <div className="ov-title-row">
         <div>
-          <p className="ov-eyebrow">SCENARIO ANALYSIS / {tab}</p>
-          <h1>Should we spend<br /><em>energy here?</em></h1>
+          <p className="ov-eyebrow">{isLapEnergyWorkspace ? `ENERGY INTELLIGENCE / ${tab}` : `SCENARIO ANALYSIS / ${tab}`}</p>
+          <h1>{isLapEnergyWorkspace ? <>How did this<br /><em>lap use energy?</em></> : <>Should we spend<br /><em>energy here?</em></>}</h1>
         </div>
         <div className="ov-scenario-summary">
-          <DataBadge tone="real">REAL RACE CONTEXT</DataBadge>
-          <strong>{raceSel.driver} <span>vs</span> {selectedContextDefender}</strong>
-          <p>{selectedEventName} · lap {selectedContextLap} of {selectedContextLaps}</p>
+          <DataBadge tone={isLapEnergyWorkspace ? 'derived' : 'real'}>{isLapEnergyWorkspace ? 'PUBLIC DATA + MODEL' : 'REAL RACE CONTEXT'}</DataBadge>
+          <strong>{isLapEnergyWorkspace ? (teamEnergy.selection.team || 'SELECT TEAM') : <>{raceSel.driver} <span>vs</span> {selectedContextDefender}</>}</strong>
+          <p>{isLapEnergyWorkspace ? `${teamEnergy.selection.session ?? 'SESSION'} · recorded telemetry + modelled energy` : `${selectedEventName} · lap ${selectedContextLap} of ${selectedContextLaps}`}</p>
         </div>
       </div>
 
@@ -347,6 +338,10 @@ export function StrategyDashboard({ onHome, onOpenSimulation }) {
         </>
       )}
 
+      {tab === 'TEAM LAP' && <TeamLapPage workspace={teamEnergy} />}
+
+      {tab === 'OPTIMAL LAP' && <OptimalLapPage workspace={teamEnergy} />}
+
       {tab === 'ENERGY' && (
         <EnergyTab sel={raceSel} energy={engine.energy} onOpenSimulation={onOpenSimulation} />
       )}
@@ -360,7 +355,7 @@ export function StrategyDashboard({ onHome, onOpenSimulation }) {
     </section>
 
     <footer className="ov-footer">
-      <span>PITWOLF / {meta.scenario_id}</span>
+      <span>PITWOLF / RACE INTELLIGENCE</span>
       <span>REAL TELEMETRY · DERIVED FEATURES · ENERGY MODEL {ENERGY_MODEL_VERSION} · ENGINE {DECISION_ENGINE_VERSION}</span>
     </footer>
   </main>

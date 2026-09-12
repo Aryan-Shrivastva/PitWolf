@@ -53,6 +53,9 @@ CONSTANTS = {
     'override_extra_harvest_mj_per_lap': reg(
         0.5, 'MJ/lap', f'{TECHNICAL_C} Art. C5.2.10 iii',
         'Additional Recharge is conditional on the Sporting Regulations and event configuration.'),
+    'standard_ecu_efficiency_correction': reg(
+        0.97, '-', f'{TECHNICAL_C} Art. C5.2.21',
+        'Fixed correction applied by Standard ECU software when converting electrical and mechanical quantities.'),
     'mgu_k_torque_max_nm': reg(
         500.0, 'Nm', f'{TECHNICAL_C} Art. C5.2.11',
         'MGU-K mechanical torque magnitude, efficiency-corrected by 0.97.'),

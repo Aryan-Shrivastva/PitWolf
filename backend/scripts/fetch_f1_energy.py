@@ -5,7 +5,9 @@ import fastf1
 import numpy as np
 
 from energy_model import compute_lap_energy
+from fia_compliance import event_context, regulation_payload
 from fetch_f1_session import CACHE_DIR, td_s
+from qualifying_straight_mode import qualifying_straight_mode_policy
 
 MAX_POINTS = 360
 
@@ -43,6 +45,15 @@ def build_energy_payload(year, round_number, session_name, driver, lap_number):
     except Exception:
         weather = None
 
+    compliance = event_context(year, round_number, session_name)
+    qualifying_policy = None
+    if str(session_name).lower() in {'qualifying', 'sprint qualifying'}:
+        qualifying_policy = qualifying_straight_mode_policy(
+            session,
+            year=year,
+            round_number=round_number,
+            trace_length_m=float(tel['Distance'].max()),
+        )
     result = compute_lap_energy(
         {
             'time': tel['Time'].dt.total_seconds().to_numpy(),
@@ -53,9 +64,13 @@ def build_energy_payload(year, round_number, session_name, driver, lap_number):
             'distance': tel['Distance'].to_numpy(dtype=float),
         },
         year=year,
+        round_number=round_number,
+        session_name=session_name,
         lap_fraction=lap_fraction,
         weather=weather,
         high_speed_kph=max(80.0, 0.4 * float(tel['Speed'].max())),
+        compliance_context=compliance,
+        qualifying_straight_mode_policy=qualifying_policy,
     )
 
     trace = result['trace']
@@ -67,7 +82,8 @@ def build_energy_payload(year, round_number, session_name, driver, lap_number):
 
     soc_window = result['summary']['socWindowMj']
     return {
-        'label': 'MODELLED',
+        'label': ('PUBLIC_TELEMETRY_CONSTRAINED_ERS_INFERENCE'
+                  if str(session_name).lower() in {'qualifying', 'sprint qualifying'} else 'MODELLED'),
         'driver': driver,
         'lapNumber': int(lap_number),
         'lapTimeS': td_s(lap.get('LapTime')),
@@ -76,6 +92,7 @@ def build_energy_payload(year, round_number, session_name, driver, lap_number):
         'session': session_name,
         'lapFraction': round(lap_fraction, 3),
         'weather': weather,
+        'regulation': result['regulation'],
         'summary': result['summary'],
         'assumptions': result['assumptions'],
         'citations': result['citations'],
@@ -89,6 +106,9 @@ def build_energy_payload(year, round_number, session_name, driver, lap_number):
             'socMj': [round(float(trace['socMj'][i]), 4) for i in keep],
             'socPct': [round(float(trace['socMj'][i] / soc_window * 100.0), 1) for i in keep],
             'clipping': [bool(trace['clipping'][i]) for i in keep],
+            'ersInferenceScore': [round(float(trace['ersInferenceScore'][i]), 3) for i in keep],
+            'straightModeEligible': [bool(trace['straightModeEligible'][i]) for i in keep],
+            'straightModeWindowIndex': [int(trace['straightModeWindowIndex'][i]) for i in keep],
         },
     }
 

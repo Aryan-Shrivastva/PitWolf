@@ -154,6 +154,21 @@
         { "zoneId": "SM-2", "from": "T10", "to": "T11" }
       ],
       "overtakeMarkerReference": { "detection": "before T13", "activation": "between T13 and T14", "status": "VISUAL_REFERENCE_ONLY" }
+    },
+    "2026:13:r": {
+      "status": "USER_CONFIRMED_STRAIGHT_MODE_POLICY",
+      "enabled": true,
+      "coordinateStatus": "TURN_RANGE_POLICY_MAPPED_TO_TELEMETRY",
+      "mappingBasis": "PITWOLF_MONZA_CIRCUIT_TOPOLOGY_FALLBACK_AFTER_USER_CONFIRMATION",
+      "cornerCount": 11,
+      "zones": [
+        { "zoneId": "SM-1", "from": "START_FINISH", "to": "T1", "description": "Main straight into Variante del Rettifilo" },
+        { "zoneId": "SM-2", "from": "T2", "to": "T4", "description": "Curva Grande approach" },
+        { "zoneId": "SM-3", "from": "T5", "to": "T6", "description": "Roggia to first Lesmo run" },
+        { "zoneId": "SM-4", "from": "T7", "to": "T8", "description": "Second Lesmo to Ascari run" },
+        { "zoneId": "SM-5", "from": "T10", "to": "T11", "description": "Ascari exit to Parabolica approach" }
+      ],
+      "overtakeMarkerReference": { "status": "NOT_USED_FOR_QUALIFYING_BATTERY_POLICY" }
     }
   }
 }
