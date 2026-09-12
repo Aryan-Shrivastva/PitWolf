@@ -682,7 +682,7 @@ export async function handler(request, response) {
     try {
       // v2 distinguishes scheduled events from rounds that actually have the
       // cached timing/position data required by the recorded replay.
-      return json(response, 200, await f1CachedOrFetch(`events/v2/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000))
+      return json(response, 200, await f1CachedOrFetch(`events/v3/${year}.json`, 'fetch_f1_events.py', ['--year', year], 120000))
     } catch (error) {
       return json(response, 502, { error: error.message })
     }
@@ -847,6 +847,26 @@ export async function handler(request, response) {
     }
     try {
       const out = await runPythonWithInput('replay_strategy.py', [], JSON.stringify(input), 60000)
+      return json(response, 200, JSON.parse(out))
+    } catch (error) {
+      return json(response, 502, { error: error.message })
+    }
+  }
+
+  // POST /api/f1/battery/rollout — modelled C5.2 battery box + AUTO ATTACK/SAVE/DELAY
+  // per lap. Frontend is unchanged; this is an extra analysis endpoint.
+  if (request.method === 'POST' && new URL(request.url, 'http://localhost').pathname === '/api/f1/battery/rollout') {
+    let input
+    try {
+      input = await readJsonBody(request)
+    } catch {
+      return json(response, 400, { error: 'request body must be valid JSON' })
+    }
+    if (!input || typeof input !== 'object' || !Array.isArray(input.laps || input.rows)) {
+      return json(response, 400, { error: 'laps[] with gap/speed/closing fields is required' })
+    }
+    try {
+      const out = await runPythonWithInput('ai_energy_rollout.py', [], JSON.stringify(input), 60000)
       return json(response, 200, JSON.parse(out))
     } catch (error) {
       return json(response, 502, { error: error.message })
