@@ -1,146 +1,383 @@
 # PitWolf
 
-### Energy and Overtake Intelligence for F1 Strategy
+## Explainable Energy and Overtake Strategy for Formula 1
 
-PitWolf is a race-strategy decision engine for Formula 1. It learns how overtakes develop from historical race data, models energy deployment under the 2026 regulations, and replays completed 2026 races to evaluate whether its recommendations could have produced a better result for a selected driver.
+PitWolf is a retrospective F1 strategy engine that estimates whether a driver should `ATTACK`, `SAVE`, or `DELAY` during a battle.
 
-> See more. Decide faster. Win on strategy.
+It combines public race telemetry, overtake modelling, tyre and pace context, modelled energy state, opponent response, and a deterministic tactical replay tree.
 
-## The idea
+PitWolf does not claim access to private team battery telemetry or prove that an alternative race result would have happened. Its output is a modelled counterfactual estimate:
 
-An overtake is not only a question of speed. It is an energy-budget decision made under changing race conditions. PitWolf combines:
+> Given the information available at a real race moment, which tactical action is estimated to preserve or gain a position for longer?
 
-1. **Overtake intelligence** - learns where and how overtakes happen using gaps, speed deltas, tyre state, track zones, pace, and race context.
-2. **Energy intelligence** - estimates deployment and recovery from telemetry, then projects it onto the 2026 power-unit rules and track limits.
-3. **Decision intelligence** - recommends `ATTACK`, `SAVE`, `DELAY`, or `BOX` with a plain-language reason.
+## Engineering problem
 
-## Retrospective 2026 race replay
+Modern overtaking is not only a question of speed.
 
-PitWolf does not alter real races. Completed 2026 races are treated as observed race histories. The system replays them from the perspective of a selected driver and evaluates counterfactual decisions at historical decision points.
+A driver may have:
 
-The replay uses the actual grid, driver, positions, gaps, telemetry, tyres, pit stops, track zones, safety-car and flag events where available, and the applicable 2026 rules. At each point, the model recommends an action and tracks the resulting position, energy state, overtake outcome, and durability of any gain.
+- A small gap to the car ahead.
+- A speed or tyre advantage.
+- A limited energy reserve.
+- A better overtaking zone approaching.
+- An opponent with enough energy to defend or attempt a repass.
+- A pit stop, flag, safety-car, or traffic event that changes the situation.
 
-For example, if a driver finished fourth in reality, but the replay recommends a feasible overtake and reaches third while remaining ahead for two or three laps or until the finish, that is evidence of a successful strategy recommendation. The system must show the reason: gap, pace delta, tyre condition, energy budget, target zone, and race context.
+A simple rule such as “attack when the gap is below one second” ignores the long-term cost of the decision.
 
-These results are retrospective counterfactual estimates, not claims that the real driver definitely would have achieved the replayed result.
-
-## Training and evaluation
-
-### Historical training data: 2018-2025
-
-The model is trained on completed races from 2018 through 2025. Decision examples include driver and opponent, grid and current position, gap, speed-trap delta, track zone, tyre compound and age, recent pace, energy context where available or derivable, safety-car/flag state, and the eventual overtake outcome.
-
-Outcomes distinguish immediate success from durable success: a pass reversed on the next lap is not treated like one that survives two or three laps or lasts to the finish. Unsuccessful attempts and lost positions are also labeled.
-
-### Held-out 2026 replay set
-
-Completed 2026 races remain separate from training. PitWolf evaluates each recommendation using only information available at that moment, preventing future race information from leaking into earlier decisions.
-
-It compares the real outcome with the replayed outcome, including action quality, position durability, energy used or saved, overtake feasibility, pit decisions, final finishing position, and strategic improvement.
-
-## Decision model
-
-- **`ATTACK`** - deploy energy when the gap, zone, pace delta, tyre state, and remaining budget support a likely overtake.
-- **`SAVE`** - preserve energy when the current opportunity is weak or a stronger one is likely soon.
-- **`DELAY`** - avoid a low-probability or rule-risky attempt and wait for recovery or a better zone.
-- **`BOX`** - pit when tyre state, traffic, race position, and projected strategy favor stopping now.
-
-Every action should include an explanation, such as: “SAVE - the current zone has low overtake probability; hold energy for the next braking zone.”
-
-## Energy model
-
-The energy layer is grounded in telemetry rather than an unexplained conversion. A simplified instantaneous power estimate is:
+The engineering challenge is to model the short-term opportunity and the longer-term consequence together:
 
 ```text
-P(t) = m * a(t) * v(t)
+Should the driver spend energy now,
+preserve it for a better opportunity,
+or delay the attempt until the state improves?
 ```
 
-The system projects computed demand onto the 2026 power-unit split, applies the relevant deployment rules, accumulates energy across the lap, and checks it against the published per-track ceiling. Where public data does not expose battery state or complete power-unit measurements, assumptions must be documented clearly. Physical plausibility must not be presented as exact battery telemetry.
+## Solution
 
-When the remaining battery parts are implemented, overtake and save scoring must follow **[BATTERY.md](BATTERY.md)**: selected-driver modelled SoC plus a `0…1` randomness term raise or lower overtake probability, then ATTACK / SAVE use that adjusted percentage.
+PitWolf has three main layers.
 
-## Validation
+### 1. Historical decision modelling
 
-PitWolf should be evaluated on:
+PitWolf extracts close-battle decision points from completed races using FastF1 data.
 
-1. **Prediction quality** - precision, recall, F1 score, and ROC-AUC for overtake feasibility and outcome classes.
-2. **Durability quality** - how often predicted gains survive 1, 2, or 3 laps.
-3. **Strategy quality** - final-position improvement, successful attacks, avoided failed attacks, and pit-stop decisions.
-4. **Physical and regulatory plausibility** - zone alignment, energy ceilings, cross-track behavior, and 2026 rule compliance.
+Features include:
 
-Because complete public battery-state data is not available for every race, the project must distinguish numerical model accuracy from physical plausibility and disclose its assumptions.
+- Gap and closing rate.
+- Relative speed and lap pace.
+- Tyre compound, age, and degradation proxies.
+- Track position and lap fraction.
+- Traffic, pack density, slipstream, and dirty-air proxies.
+- DRS or overtake eligibility where available.
+- Race-control and pit-cycle context.
+- Modelled energy state for both drivers.
 
-## Data and methodology references
+Historical races from 2018–2025 are used for training and development. Completed 2026 races are held out for final evaluation.
 
-The intended sources are FastF1 session/lap/telemetry/position data, OpenF1 and compatible open race-data sources, FIA 2026 regulations, and established telemetry feature-engineering approaches.
+The extracted labels describe outcome patterns. They are not claims about what the driver was actually instructed to do.
+
+### 2. Modelled energy state
+
+Public FastF1 data does not expose a team’s private battery state, ERS button presses, deployment map, or strategic instructions.
+
+PitWolf therefore labels energy values as `MODELLED`.
+
+The energy layer estimates deployment and recovery using public telemetry and regulation-aware constraints. It tracks both cars so that:
+
+- The attacker can spend energy to attempt a pass.
+- The defender can spend energy to prevent the pass.
+- The former defender can attempt a repass after losing position.
+- Energy is carried forward instead of being reset after a pit stop.
+
+The result is a physically and regulatorily constrained surrogate, not measured team battery telemetry.
+
+### 3. Tactical replay
+
+At a selected historical decision point, PitWolf evaluates:
 
 ```text
-Training:   2018-2025
-Evaluation: completed 2026 races
+ATTACK
+SAVE
+DELAY
 ```
 
-No 2026 race outcome should train a recommendation that is later evaluated on that same race.
+The tactical tree:
 
-## Product experience
+1. Starts from the observed race state.
+2. Evaluates all three actions.
+3. Applies the shared energy transition.
+4. Models a deterministic conservative opponent response.
+5. Reverses attacker and defender roles after a pass.
+6. Projects position durability over a bounded horizon.
+7. Compares the estimated result with the observed race.
 
-The strategy cockpit should provide selected-driver controls, a track map with overtake/recovery/deployment zones, gap and pace deltas, tyre and energy state, driver-versus-opponent telemetry overlays, recommendation confidence, plain-language explanations, a replay timeline, and a comparison between real and counterfactual results.
+The primary tactical objective is expected laps ahead. Final finishing position is reported separately because the current replay models a selected battle pair rather than the entire field.
 
-## Repository structure
+## Architecture
+
+```mermaid
+flowchart LR
+    UI[React/Vite cockpit] --> API[Node.js API]
+
+    API --> REPLAY[Replay service]
+    API --> PREDICT[Prediction service]
+    API --> DATA[FastF1 data services]
+
+    DATA --> CACHE[(Local FastF1 cache)]
+
+    REPLAY --> TRANSITION[Shared energy transition]
+    REPLAY --> TREE[ATTACK/SAVE/DELAY tactical tree]
+    PREDICT --> MODEL[(Trained model artifacts)]
+    PREDICT --> FEATURES[Versioned feature contract]
+
+    EXTRACT[Decision-point extractor] --> FEATURES
+    EXTRACT --> CACHE
+    TRAIN[Training and validation scripts] --> MODEL
+
+    FASTF1[FastF1 / public race data] --> DATA
+    FIA[FIA regulation and event evidence] --> TRANSITION
+
+    TREE --> API
+    MODEL --> API
+```
+
+### Main components
 
 ```text
-PitWolf/
-├── frontend/                    # React + Vite strategy cockpit interface
-├── backend/                     # Node.js API and decision services
-├── analytics/                   # Data preparation, modeling, and evaluation
-├── supabase/                    # Database schema and backend configuration
-├── README.md                    # Product idea and run commands
-├── VALIDATION.md                # What we may claim
-├── Simulation.md                # Replay lab design
-├── BATTERY.md                   # Battery → overtake contract
-├── TEAMMATE_LOCAL_DATA.md       # Cache + model setup on another laptop
-├── PROJECT_PROGRESS.md          # Status and demo
-└── package.json
+frontend/
+  React/Vite strategy cockpit
+
+backend/server.mjs
+  Node.js API and process orchestration
+
+backend/scripts/
+  FastF1 extraction
+  feature generation
+  model training
+  energy modelling
+  tactical replay
+  validation and audit tools
+
+backend/data/
+  source-controlled static evidence and rule context
+
+backend/data/f1-cache/
+  local generated race data, models, reports, and replay artifacts
 ```
 
-## Run locally
+The FastF1 cache is intentionally ignored by Git because it is large, machine-generated, and reproducible.
 
-```bash
-npm install
-npm run dev
+## Installation
+
+### Requirements
+
+- Git
+- Node.js 20 or later
+- Python 3.13
+- Internet access for FastF1 downloads
+- Approximately 30 GB of free disk space for a full local rebuild
+
+### Install JavaScript dependencies
+
+From the repository root:
+
+```powershell
+npm ci
 ```
 
-In a second terminal:
+### Create the Python environment
 
-```bash
+```powershell
+py -3.13 -m venv backend\.venv
+backend\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -r backend\requirements-data.txt
+```
+
+Verify the environment:
+
+```powershell
+Get-Command python
+python -c "import fastf1, pandas, numpy, sklearn, duckdb; print('Data environment OK')"
+```
+
+The active Python should resolve to:
+
+```text
+backend\.venv\Scripts\python.exe
+```
+
+## Run the application
+
+Start the backend in one terminal:
+
+```powershell
+backend\.venv\Scripts\Activate.ps1
 npm run server
 ```
 
-Useful checks:
+Start the frontend in a second terminal:
 
-```bash
-npm run build
-node --check backend/server.mjs
+```powershell
+npm run dev -- --host 127.0.0.1
 ```
 
-The frontend runs on Vite and the backend listens on port `8787` by default.
+Open:
 
-## Implementation roadmap
+```text
+http://127.0.0.1:5173/
+```
 
-1. Ingest and normalize 2018-2025 race history.
-2. Build a leakage-safe overtake and durability dataset.
-3. Add telemetry, track-zone, tyre, gap, and energy features.
-4. Implement the regulation-aware 2026 energy projection model.
-5. Train and validate overtake-feasibility and outcome models.
-6. Build a deterministic retrospective 2026 replay engine.
-7. Add driver selection, race-event controls, replay timelines, and explanations.
-8. Score recommendations against real outcomes and durable position gains.
+Check the backend:
 
-## Principles
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/api/health
+```
 
-- Use real race data wherever possible.
-- Keep 2026 evaluation races held out from training.
-- Never hide assumptions behind a black-box energy conversion.
-- Treat rule compliance as a hard constraint.
-- Score durable race outcomes, not only immediate overtakes.
-- Explain every recommendation in driver- and engineer-friendly language.
-- Clearly label counterfactual replay results as estimates.
+## Working demonstration
+
+The application can replay recorded public race data before the full historical model is built.
+
+For a model-backed demonstration, create the local decision-point dataset and train the model:
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\batch_extract_decision_points.py `
+  --start-year 2018 `
+  --end-year 2025 `
+  --session R `
+  --hold-laps 6
+```
+
+Then train the model:
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\train_overtake_model.py `
+  --test-from 2026 `
+  --n-jobs 1
+```
+
+The expected local artifacts are:
+
+```text
+backend/data/f1-cache/models/overtake_rf.joblib
+backend/data/f1-cache/models/overtake_report.json
+```
+
+### Demonstration flow
+
+1. Open the PitWolf cockpit.
+2. Select a completed 2026 race.
+3. Select a driver and a recorded lap.
+4. Inspect the real race state:
+   - position;
+   - gap;
+   - pace;
+   - tyre context;
+   - telemetry;
+   - race-control state.
+5. Select `JUMP / BRANCH LAP`.
+6. Start the PitWolf branch.
+7. Compare `ATTACK`, `SAVE`, and `DELAY`.
+8. Inspect both cars’ modelled energy state.
+9. Review the opponent response and estimated position durability.
+10. Compare the branch with the observed race and validation baselines.
+
+The replay is a modelled selected-pair analysis. It is not a rewritten official classification.
+
+## Experimental results
+
+The current v6 evaluation is a research benchmark using historical training data and completed 2026 holdout races.
+
+A current reported run gives the following results:
+
+| Method | Accuracy | Macro F1 |
+|---|---:|---:|
+| Random Forest action policy | 70.85% | 48.20% |
+| Logistic Regression | 56.68% | 41.17% |
+| Gradient Boosted Trees | 60.26% | 44.81% |
+| Always-SAVE baseline | 77.36% | 29.08% |
+
+The Random Forest has better balanced performance than always-SAVE, especially because always-SAVE never identifies ATTACK or DELAY. However, always-SAVE still has higher raw accuracy because `SAVE` is the dominant class.
+
+Therefore, the current model is a research candidate, not a validated live race-command policy.
+
+Additional diagnostic results include:
+
+- Immediate-pass modelling shows useful ranking signal but is observational, not causal.
+- Pass-durability modelling has moderate discrimination at longer horizons but does not yet beat a historical constant-rate reference on probability error.
+- The BOX baseline has an AUC of approximately 0.69, but only around 6% precision at the neutral threshold because pit entry is a rare event.
+- Weather features were tested and excluded from the active model after reducing held-out performance.
+- Probability calibration reduced calibration error but harmed action classification performance, so it remains a benchmark rather than the production candidate.
+
+## Tests and validation
+
+Basic software checks:
+
+```powershell
+npm run build
+node --check backend/server.mjs
+python -m py_compile backend\scripts\replay_strategy.py
+```
+
+The data and modelling pipeline also includes audits for:
+
+- Future-feature leakage.
+- Decision-point schema versions.
+- Label eligibility.
+- Participant rosters.
+- Driver position summaries.
+- Shared feature contracts.
+- Energy transition behaviour.
+- Cached race completeness.
+
+Validation must be performed using race-grouped temporal splits. Rows from the same race should not be randomly divided between training and testing because adjacent laps are strongly correlated.
+
+The final evaluation must keep the evaluated 2026 races outside model fitting and threshold selection.
+
+## Limitations and failure cases
+
+### Private battery state is unavailable
+
+PitWolf cannot observe:
+
+- Actual team state of charge.
+- Exact ERS deployment commands.
+- Team energy-management modes.
+- Driver radio instructions.
+- Fuel load and setup details.
+
+All battery and deployment outputs are modelled estimates.
+
+### The replay is currently pair-focused
+
+The tactical replay models the selected driver and immediate opponent. It does not yet fully model:
+
+- Every car in the field.
+- Counterfactual traffic.
+- Undercut and overcut outcomes.
+- Tyre warm-up after a pit stop.
+- Complete pit strategy.
+- Retirements.
+- Future safety-car or red-flag changes.
+
+A projected pair result must not be described as a guaranteed alternate finishing position.
+
+### Observed actions are not causal labels
+
+A real pass proves that a pass happened under the real driver’s action and environment. It does not prove that ATTACK caused the result or that SAVE would have failed.
+
+For this reason, immediate-pass and durability components are currently diagnostic and are not treated as causal action-effect models.
+
+### FIA data is event-specific
+
+Generic gap thresholds cannot represent every circuit’s 2026 Overtake Mode rules.
+
+A race remains `ANALYSIS_ONLY` when exact cited detection lines, activation lines, recharge limits, power profiles, or race-control restrictions are unavailable.
+
+PitWolf is:
+
+> A public-data-based, explainable F1 strategy research engine that estimates the energy and position-durability consequences of ATTACK, SAVE, and DELAY decisions in historical race situations.
+
+PitWolf is not yet:
+
+- A live pit-wall command system.
+- A source of private battery telemetry.
+- A complete full-grid race simulator.
+- Proof that a counterfactual result would have happened.
+- A guaranteed optimal strategy planner.
+
+## Roadmap
+
+1. Improve minority-action precision and recall.
+2. Complete broader unseen-race replay evaluation.
+3. Improve same-time and same-track-distance alignment.
+4. Add stronger causal pass and durability modelling.
+5. Validate tyre, pit, traffic, and race-control transitions.
+6. Expand from selected-pair replay to wider race-state modelling.
+7. Keep exact FIA event data and command gating separate from generic analysis.
+8. Consider real-time inference only after the retrospective system is reliable.
+
+## Research status
+
+PitWolf is an experimental research and engineering project. Results should be interpreted with the stated data, model, and replay assumptions.
